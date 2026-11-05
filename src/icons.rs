@@ -4,10 +4,10 @@
 use std::sync::mpsc::{Sender, channel};
 
 use windows::Win32::Foundation::{HWND, LPARAM, SIZE, WPARAM};
-use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, HGDIOBJ, ReleaseDC};
+use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, HBITMAP, HGDIOBJ, ReleaseDC};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
-use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY};
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SHDefExtractIconW, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY};
+use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO, PostMessageW};
 use windows::core::HSTRING;
 
 /// A square icon, BGRA with premultiplied alpha. Empty `pixels` means extraction failed.
@@ -17,37 +17,68 @@ pub struct Icon {
     pub pixels: Vec<u8>,
 }
 
+/// Top-down 32-bit pixels of a `size` x `size` bitmap; the bitmap is deleted.
+fn take_pixels(bmp: HBITMAP, size: u32) -> Option<Vec<u8>> {
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size as i32,
+            biHeight: -(size as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut px = vec![0u8; (size * size * 4) as usize];
+    unsafe {
+        let dc = GetDC(None);
+        let rows = GetDIBits(dc, bmp, 0, size, Some(px.as_mut_ptr() as *mut _), &mut info, DIB_RGB_COLORS);
+        ReleaseDC(None, dc);
+        _ = DeleteObject(HGDIOBJ(bmp.0));
+        (rows == size as i32).then_some(px)
+    }
+}
+
+/// Icon resource of an exe, scaled by the shell to `size`. Unlike the item
+/// image factory it never puts a small icon inside a grey "document" frame.
+fn exe_icon(path: &str, size: u32) -> Option<Vec<u8>> {
+    unsafe {
+        let mut hicon = HICON::default();
+        SHDefExtractIconW(&HSTRING::from(path), 0, 0, Some(&mut hicon), None, size).ok().ok()?;
+        let mut info = ICONINFO::default();
+        let got = GetIconInfo(hicon, &mut info);
+        _ = DestroyIcon(hicon);
+        got.ok()?;
+        let color = take_pixels(info.hbmColor, size);
+        let mask = take_pixels(info.hbmMask, size);
+        let mut px = color?;
+        // Old icons carry transparency only in the AND mask (white = transparent).
+        if px.chunks_exact(4).all(|p| p[3] == 0)
+            && let Some(mask) = mask
+        {
+            for (p, m) in px.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
+                p[3] = if m[0] == 0 { 255 } else { 0 };
+            }
+        }
+        Some(px)
+    }
+}
+
 /// Shell icon for a parsing name: an exe or .lnk path, or `shell:AppsFolder\<AUMID>`.
 /// Needs COM on the calling thread.
 pub fn load(source: &str, size: u32) -> Icon {
-    let pixels = unsafe {
+    let from_exe = || source.to_ascii_lowercase().ends_with(".exe").then(|| exe_icon(source, size)).flatten();
+    let from_shell = || unsafe {
         SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(&HSTRING::from(source), None)
             .and_then(|f| f.GetImage(SIZE { cx: size as i32, cy: size as i32 }, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK))
-            .map(|bmp| {
-                let mut info = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: size as i32,
-                        biHeight: -(size as i32), // top-down rows
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                let mut px = vec![0u8; (size * size * 4) as usize];
-                let dc = GetDC(None);
-                let rows = GetDIBits(dc, bmp, 0, size, Some(px.as_mut_ptr() as *mut _), &mut info, DIB_RGB_COLORS);
-                ReleaseDC(None, dc);
-                _ = DeleteObject(HGDIOBJ(bmp.0));
-                if rows == size as i32 { px } else { Vec::new() }
-            })
-            .unwrap_or_default()
+            .ok()
+            .and_then(|bmp| take_pixels(bmp, size))
     };
-    let mut icon = Icon { source: source.to_string(), size, pixels };
-    normalize_alpha(&mut icon.pixels);
-    icon
+    let mut pixels = from_exe().or_else(from_shell).unwrap_or_default();
+    normalize_alpha(&mut pixels);
+    Icon { source: source.to_string(), size, pixels }
 }
 
 /// The shell hands back straight alpha for some icons and no alpha at all for
