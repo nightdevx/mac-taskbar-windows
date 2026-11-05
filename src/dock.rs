@@ -76,6 +76,8 @@ thread_local! {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Geometry {
     pub icon: f32,
+    /// First item right of the separator (folders, Trash), as on macOS.
+    pub sep: Option<usize>,
 }
 
 impl Geometry {
@@ -92,21 +94,42 @@ impl Geometry {
     pub fn radius(self) -> f32 {
         (self.icon * 0.375).round()
     }
+    /// Room the separator line takes between the two sections.
+    pub fn sep_w(self) -> f32 {
+        self.gap() + 1.0
+    }
+    /// Whether item `i` of `n` starts the right-hand section.
+    pub fn sep_before(self, i: usize, n: usize) -> bool {
+        self.sep == Some(i) && i > 0 && i < n
+    }
     pub fn width(self, n: usize) -> f32 {
+        let has_sep = self.sep.is_some_and(|s| s > 0 && s < n);
         let n = n.max(1) as f32;
-        2.0 * self.pad() + n * self.icon + (n - 1.0) * self.gap()
+        2.0 * self.pad() + n * self.icon + (n - 1.0) * self.gap() + if has_sep { self.sep_w() } else { 0.0 }
     }
     pub fn height(self) -> f32 {
         self.pad() + self.icon + self.pad_bottom()
     }
     pub fn item_x(self, i: usize) -> f32 {
-        self.pad() + i as f32 * (self.icon + self.gap())
+        let past_sep = self.sep.is_some_and(|s| s > 0 && i >= s);
+        self.pad() + i as f32 * (self.icon + self.gap()) + if past_sep { self.sep_w() } else { 0.0 }
     }
 }
 
 // ---- model ----
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    App,
+    /// Pinned folder right of the separator; opens as a stack.
+    Folder,
+    Trash,
+}
+
+const TRASH: &str = r"shell:RecycleBinFolder";
+
 struct Item {
+    kind: Kind,
     identity: AppIdentity,
     /// Pin source when pinned (.lnk, exe or `shell:AppsFolder\<AUMID>`).
     pin: Option<String>,
@@ -211,6 +234,9 @@ struct Comp {
     items: ContainerVisual,
     dot_surface: CompositionDrawingSurface,
     dot_brush: CompositionSurfaceBrush,
+    /// Thin line between apps and folders/Trash.
+    sep_line: SpriteVisual,
+    sep_brush: windows::UI::Composition::CompositionColorBrush,
 }
 
 pub struct Dock {
@@ -233,6 +259,7 @@ pub struct Dock {
     hovered: Cell<Option<usize>>,
     /// Settings window keeps the dock out.
     held: Cell<bool>,
+    trash_full: Cell<bool>,
     tracking: Cell<bool>,
     registered: Cell<bool>,
     items: RefCell<Vec<Item>>,
@@ -260,6 +287,7 @@ impl Dock {
             smooth: Cell::new(true),
             hovered: Cell::new(None),
             held: Cell::new(false),
+            trash_full: Cell::new(false),
             tracking: Cell::new(false),
             registered: Cell::new(false),
             items: RefCell::new(Vec::new()),
@@ -285,6 +313,7 @@ impl Dock {
                 dock.items.borrow_mut()[i].windows = e.windows;
             }
         }
+        dock.sync_stacks();
         unsafe {
             _ = RegisterShellHookWindow(hwnd);
             SetWinEventHook(
@@ -314,6 +343,7 @@ impl Dock {
 
     fn geometry(&self) -> Geometry {
         Geometry {
+            sep: self.items.borrow().iter().position(|i| i.kind != Kind::App),
             icon: settings::get().dock_icon,
         }
     }
@@ -361,6 +391,11 @@ impl Dock {
         frame.Children()?.InsertAtTop(&backdrop.tint_visual)?;
 
         let items = c.CreateContainerVisual()?;
+        let sep_brush = c.CreateColorBrush()?;
+        let sep_line = c.CreateSpriteVisual()?;
+        sep_line.SetBrush(&sep_brush)?;
+        sep_line.SetImplicitAnimations(&follow)?;
+        items.Children()?.InsertAtTop(&sep_line)?;
         let dot_surface = self.gfx.surface(1, 1)?;
         let dot_brush = c.CreateSurfaceBrushWithSurface(&dot_surface)?;
 
@@ -377,6 +412,8 @@ impl Dock {
             backdrop,
             follow,
             still,
+            sep_line,
+            sep_brush,
             shape,
             items,
             dot_surface,
@@ -498,6 +535,18 @@ impl Dock {
             Z: 0.0,
         });
         _ = c.frame.SetSize(frame);
+        // Separator: centred in its room before the first folder/Trash item.
+        let line_h = (g.icon * 0.7 * s).round();
+        match g.sep.filter(|i| g.sep_before(*i, items.len())) {
+            Some(i) => {
+                let x = ((l.items[i].0 - g.sep_w() / 2.0 - g.gap() / 2.0) * s).round();
+                _ = c.sep_line.SetIsVisible(true);
+                _ = c.sep_line.SetSize(Vector2 { X: s.round().max(1.0), Y: line_h });
+                _ = c.sep_line.SetOffset(Vector3 { X: x, Y: ((g.pad() + g.icon) * s - line_h).round(), Z: 0.0 });
+                _ = c.sep_brush.SetColor(theme::Rgba(self.palette.get().text.0, self.palette.get().text.1, self.palette.get().text.2, 70).ui());
+            }
+            None => _ = c.sep_line.SetIsVisible(false),
+        }
         _ = c.shape.SetSize(frame);
         // Even pixel sizes so icon and dot share one exact centre line.
         let even = |v: f32| ((v / 2.0).round() * 2.0).max(2.0);
@@ -641,12 +690,27 @@ impl Dock {
         let first = self.pointer.replace(Some(x)).is_none();
         unsafe { _ = KillTimer(Some(self.hwnd.get()), TIMER_REST) };
         if first {
+            self.refresh_trash();
             // Grow in with the animation, then follow the pointer directly (no restarts, no lag).
             self.smooth.set(true);
             unsafe { SetTimer(Some(self.hwnd.get()), TIMER_FOLLOW, FOLLOW_MS, None) };
             self.update_region();
         }
         self.position_items();
+    }
+
+    /// Screen x of item `i`'s centre and y just above its (magnified) icon.
+    fn icon_anchor(&self, i: usize) -> (i32, i32) {
+        let s = self.scale();
+        let g = self.geometry();
+        let l = magnify::layout(g, self.items.borrow().len(), self.pointer.get(), settings::get().dock_magnify);
+        let (left, k) = l.items.get(i).copied().unwrap_or((0.0, 1.0));
+        let (side, above) = self.headroom();
+        let mut rc = RECT::default();
+        unsafe { _ = GetWindowRect(self.hwnd.get(), &mut rc) };
+        let x = rc.left + ((side + left + g.icon * k / 2.0) * s).round() as i32;
+        let top = rc.top + ((above + g.pad() + g.icon * (1.0 - k) - 8.0) * s).round() as i32;
+        (x, top)
     }
 
     // ---- hover previews ----
@@ -784,6 +848,16 @@ impl Dock {
         pin: Option<String>,
         source: String,
     ) -> Option<usize> {
+        self.add_kind(Kind::App, identity, pin, source)
+    }
+
+    fn add_kind(
+        &self,
+        kind: Kind,
+        identity: AppIdentity,
+        pin: Option<String>,
+        source: String,
+    ) -> Option<usize> {
         let comp = self.comp.borrow();
         let c = comp.as_ref()?;
         let compositor = &self.gfx.compositor;
@@ -797,7 +871,15 @@ impl Dock {
         drop(comp);
         self.set_icon(&icon, &source);
         let mut items = self.items.borrow_mut();
-        items.push(Item {
+        // Apps stay left of the separator; folders before Trash; Trash last.
+        let at = match kind {
+            Kind::App => items.iter().position(|i| i.kind != Kind::App),
+            Kind::Folder => items.iter().position(|i| i.kind == Kind::Trash),
+            Kind::Trash => None,
+        }
+        .unwrap_or(items.len());
+        items.insert(at, Item {
+            kind,
             identity,
             pin,
             windows: Vec::new(),
@@ -805,7 +887,34 @@ impl Dock {
             icon,
             dot,
         });
-        Some(items.len() - 1)
+        Some(at)
+    }
+
+    /// Folders from the settings, then Trash, right of the separator.
+    fn sync_stacks(&self) {
+        while let Some(i) = self.items.borrow().iter().position(|i| i.kind != Kind::App) {
+            self.remove_item(i);
+        }
+        let none = || AppIdentity { aumid: None, exe: None };
+        for folder in settings::folders(&settings::get()) {
+            self.add_kind(Kind::Folder, none(), Some(folder.clone()), folder);
+        }
+        self.add_kind(Kind::Trash, none(), Some(TRASH.into()), TRASH.into());
+        self.trash_full.set(trash_full());
+        self.relayout();
+    }
+
+    /// Trash icon follows its state (empty/full); checked when the pointer arrives.
+    fn refresh_trash(&self) {
+        let full = trash_full();
+        if self.trash_full.replace(full) == full {
+            return;
+        }
+        self.brushes.borrow_mut().remove(TRASH);
+        self.requested.borrow_mut().remove(TRASH);
+        if let Some(icon) = self.items.borrow().iter().find(|i| i.kind == Kind::Trash).map(|i| i.icon.clone()) {
+            self.set_icon(&icon, TRASH);
+        }
     }
 
     fn remove_item(&self, index: usize) {
@@ -979,6 +1088,21 @@ impl Dock {
     /// is already in front, or cycle through several windows.
     fn click(&self, x_px: i32, new_instance: bool) {
         let Some(i) = self.item_at(x_px) else { return };
+        let (kind, source) = {
+            let items = self.items.borrow();
+            (items[i].kind, items[i].source.clone())
+        };
+        match kind {
+            Kind::Folder => {
+                let (x, top) = self.icon_anchor(i);
+                return crate::stack::show(&source, x, top);
+            }
+            Kind::Trash => {
+                unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(TRASH), None, None, SW_SHOWNORMAL) };
+                return;
+            }
+            Kind::App => {}
+        }
         let (windows, launch) = {
             let items = self.items.borrow();
             let item = &items[i];
@@ -1033,6 +1157,15 @@ impl Dock {
         const WINDOW: u32 = 100;
         preview::hide();
         let index = self.item_at(x_px);
+        if let Some(i) = index {
+            let (kind, source) = {
+                let items = self.items.borrow();
+                (items[i].kind, items[i].source.clone())
+            };
+            if kind != Kind::App {
+                return self.stack_menu(i, kind, source);
+            }
+        }
         let mut entries = Vec::new();
         let (windows, launch, exe) = match index {
             Some(i) => {
@@ -1199,6 +1332,57 @@ impl Dock {
         unsafe { SetTimer(Some(self.hwnd.get()), TIMER_PEEK, PEEK_MS, None) };
     }
 
+    /// Right click on a folder or the Trash (macOS: Open, Remove from Dock, Empty Trash).
+    fn stack_menu(&self, i: usize, kind: Kind, source: String) {
+        const OPEN: u32 = 1;
+        const REMOVE: u32 = 2;
+        const EMPTY: u32 = 3;
+        const SETTINGS: u32 = 4;
+        let mut entries = vec![menu::Entry::item(OPEN, if kind == Kind::Trash { "Çöp Sepetini aç" } else { "Gezgin'de aç" })];
+        match kind {
+            Kind::Trash => entries.push(menu::Entry::item(EMPTY, "Çöp Sepetini boşalt…")),
+            _ => entries.push(menu::Entry::item(REMOVE, "Dock'tan kaldır")),
+        }
+        entries.push(menu::Entry::Separator);
+        entries.push(menu::Entry::item(SETTINGS, "Dock ayarları…"));
+        let (x, top) = self.icon_anchor(i);
+        self.hold(1);
+        let dock: &'static Dock = unsafe { &*(self as *const Dock) };
+        menu::show(entries, x, popup::Place::Above(top), move |id| match id {
+            OPEN => unsafe {
+                ShellExecuteW(None, w!("open"), &HSTRING::from(source.as_str()), None, None, SW_SHOWNORMAL);
+            },
+            REMOVE => {
+                let gone = source.clone();
+                settings::update(|st| {
+                    let mut f = settings::folders(st);
+                    f.retain(|p| *p != gone);
+                    st.folders = Some(f);
+                });
+            }
+            // A second, explicit choice before deleting files for good.
+            EMPTY => menu::show(
+                vec![
+                    menu::Entry::item(0, "Çöp Sepetindeki öğeler kalıcı olarak silinsin mi?"),
+                    menu::Entry::Separator,
+                    menu::Entry::item(1, "Çöp Sepetini boşalt"),
+                    menu::Entry::item(2, "Vazgeç"),
+                ],
+                x,
+                popup::Place::Above(top),
+                move |id| {
+                    if id == 1 {
+                        empty_trash();
+                        dock.refresh_trash();
+                    }
+                },
+            ),
+            SETTINGS => crate::prefs::open(),
+            _ => {}
+        });
+        unsafe { SetTimer(Some(self.hwnd.get()), TIMER_PEEK, PEEK_MS, None) };
+    }
+
     /// Keeps or removes the app at `index`; the first change copies the
     /// Windows taskbar pins into our own list.
     fn toggle_pin(&self, index: usize) {
@@ -1230,6 +1414,9 @@ impl Dock {
 
     /// Follows a settings change (from the menu or the settings window).
     pub fn apply(&self, before: &Settings, after: &Settings) {
+        if settings::folders(before) != settings::folders(after) {
+            self.sync_stacks();
+        }
         let layout = (
             after.dock_icon,
             after.dock_autohide,
@@ -1401,7 +1588,17 @@ unsafe extern "system" fn on_cloak(
 mod tests {
     use super::*;
 
-    const G: Geometry = Geometry { icon: 48.0 };
+    const G: Geometry = Geometry { icon: 48.0, sep: None };
+
+    #[test]
+    fn separator_adds_room_between_sections() {
+        let g = Geometry { icon: 48.0, sep: Some(2) };
+        assert_eq!(g.width(4), G.width(4) + g.sep_w());
+        assert_eq!(g.item_x(1), G.item_x(1));
+        assert_eq!(g.item_x(2), G.item_x(2) + g.sep_w());
+        let only_stacks = Geometry { icon: 48.0, sep: Some(0) };
+        assert_eq!(only_stacks.width(2), G.width(2), "no line without apps on the left");
+    }
 
     #[test]
     fn geometry_scales_with_icon_size() {
@@ -1409,9 +1606,9 @@ mod tests {
             (G.pad(), G.pad_bottom(), G.height(), G.radius()),
             (6.0, 10.0, 64.0, 18.0)
         );
-        let small = Geometry { icon: 32.0 };
+        let small = Geometry { icon: 32.0, sep: None };
         assert_eq!((small.pad(), small.height()), (4.0, 44.0));
-        let big = Geometry { icon: 64.0 };
+        let big = Geometry { icon: 64.0, sep: None };
         assert_eq!((big.pad(), big.height()), (8.0, 84.0));
     }
 
@@ -1442,4 +1639,18 @@ mod tests {
         );
         assert!(source_for(&id(None, None)).is_none());
     }
+}
+
+/// Whether the Recycle Bin holds anything (decides its empty/full icon).
+fn trash_full() -> bool {
+    use windows::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
+    let mut info = SHQUERYRBINFO { cbSize: size_of::<SHQUERYRBINFO>() as u32, ..Default::default() };
+    unsafe { SHQueryRecycleBinW(PCWSTR::null(), &mut info) }.is_ok() && info.i64NumItems > 0
+}
+
+/// Empties the Recycle Bin without Windows' own confirmation, progress or sound
+/// (the dock menu already asked).
+fn empty_trash() {
+    use windows::Win32::UI::Shell::{SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW};
+    unsafe { _ = SHEmptyRecycleBinW(None, PCWSTR::null(), SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND) };
 }

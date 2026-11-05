@@ -19,6 +19,7 @@ mod preview;
 mod settings;
 mod shelltray;
 mod snapshot;
+mod stack;
 mod status;
 mod theme;
 mod wifi;
@@ -94,6 +95,7 @@ fn run(hidden: bool, open_settings: bool) -> Result<()> {
     prefs::init(gfx.clone())?;
     menu::init(gfx.clone())?;
     panels::init(gfx.clone())?;
+    stack::init(gfx.clone())?;
     preview::init(
         gfx,
         unsafe { FindWindowW(dock::CLASS, None) }.unwrap_or_default(),

@@ -22,6 +22,8 @@ pub struct Settings {
     /// Pinned apps as icon/launch sources (.lnk, exe path, `shell:AppsFolder\<AUMID>`).
     /// `None` until the user changes pins: then the Windows taskbar's pins are used.
     pub pins: Option<Vec<String>>,
+    /// Folders right of the dock separator (stacks). `None`: Downloads.
+    pub folders: Option<Vec<String>>,
     pub battery_percent: bool,
 }
 
@@ -33,6 +35,7 @@ impl Default for Settings {
             dock_indicators: true,
             dock_magnify: 1.5,
             pins: None,
+            folders: None,
             battery_percent: true,
         }
     }
@@ -74,6 +77,8 @@ pub fn parse(text: &str) -> Settings {
             "battery_percent" => s.battery_percent = flag(value, s.battery_percent),
             "pins" if value.is_empty() => s.pins = Some(Vec::new()),
             "pin" => s.pins.get_or_insert_with(Vec::new).push(value.to_string()),
+            "folders" if value.is_empty() => s.folders = Some(Vec::new()),
+            "folder" => s.folders.get_or_insert_with(Vec::new).push(value.to_string()),
             _ => {}
         }
     }
@@ -92,7 +97,28 @@ pub fn format(s: &Settings) -> String {
             .for_each(|p| out.push_str(&format!("pin = {p}\n"))),
         None => {}
     }
+    match &s.folders {
+        Some(f) if f.is_empty() => out.push_str("folders =\n"),
+        Some(f) => f.iter().for_each(|p| out.push_str(&format!("folder = {p}\n"))),
+        None => {}
+    }
     out
+}
+
+/// Pinned folders, Downloads until the user changes them.
+pub fn folders(s: &Settings) -> Vec<String> {
+    s.folders.clone().unwrap_or_else(|| downloads().into_iter().collect())
+}
+
+pub fn downloads() -> Option<String> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+    unsafe {
+        let p = SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s
+    }
 }
 
 fn load() -> Settings {
@@ -157,11 +183,13 @@ mod tests {
             dock_indicators: false,
             dock_magnify: 1.75,
             pins: Some(vec![r"C:\a\b.lnk".into(), r"shell:AppsFolder\X!App".into()]),
+            folders: Some(vec![r"C:\Users\u\Downloads".into()]),
             battery_percent: false,
         };
         assert_eq!(parse(&format(&s)), s);
         let empty = Settings {
             pins: Some(Vec::new()),
+            folders: Some(Vec::new()),
             ..Settings::default()
         };
         assert_eq!(

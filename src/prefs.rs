@@ -58,15 +58,18 @@ pub enum Control {
     Magnify,
     AutoHide,
     Indicators,
+    /// Pin a folder right of the dock separator.
+    AddFolder,
     BatteryPercent,
 }
 
 /// Keyboard focus order, also the order rows are laid out in.
-pub const CONTROLS: [Control; 5] = [
+pub const CONTROLS: [Control; 6] = [
     Control::Size,
     Control::Magnify,
     Control::AutoHide,
     Control::Indicators,
+    Control::AddFolder,
     Control::BatteryPercent,
 ];
 const GROUPS: [&str; 2] = ["Dock", "Menü çubuğu"];
@@ -78,6 +81,7 @@ impl Control {
             Control::Magnify => "Büyütme",
             Control::AutoHide => "Dock'u otomatik olarak gizle ve göster",
             Control::Indicators => "Açık uygulamalar için göstergeleri göster",
+            Control::AddFolder => "Dock'taki klasörler",
             Control::BatteryPercent => "Pil yüzdesini göster",
         }
     }
@@ -115,7 +119,7 @@ impl Control {
     }
     fn is_on(self, s: &Settings) -> bool {
         match self {
-            Control::Size | Control::Magnify => false,
+            Control::Size | Control::Magnify | Control::AddFolder => false,
             Control::AutoHide => s.dock_autohide,
             Control::Indicators => s.dock_indicators,
             Control::BatteryPercent => s.battery_percent,
@@ -123,7 +127,7 @@ impl Control {
     }
     fn toggle(self, s: &mut Settings) {
         match self {
-            Control::Size | Control::Magnify => {}
+            Control::Size | Control::Magnify | Control::AddFolder => {}
             Control::AutoHide => s.dock_autohide ^= true,
             Control::Indicators => s.dock_indicators ^= true,
             Control::BatteryPercent => s.battery_percent ^= true,
@@ -406,6 +410,15 @@ pub fn draw(
                         dc.DrawEllipse(&ellipse(kx, ky, KNOB / 2.0 + 3.0), &accent, 2.0, None);
                     }
                 }
+                Control::AddFolder => {
+                    // A button-like accent label, as in macOS settings.
+                    let l = Label::new(dwrite, "Klasör ekle…", &fonts.text)?;
+                    l.draw_text(dc, row.right - INNER - l.width, mid2, fonts.cap, &accent);
+                    if focused {
+                        let ring = rect(row.right - INNER - l.width - 6.0, row.top + 8.0, row.right - INNER + 6.0, row.bottom - 8.0);
+                        dc.DrawRoundedRectangle(&rounded(ring, 6.0), &accent, 2.0, None);
+                    }
+                }
                 _ => {
                     let s = switch_rect(row);
                     let on = c.is_on(&v.settings);
@@ -436,6 +449,21 @@ pub fn draw(
         }
     }
     Ok(())
+}
+
+/// Windows folder picker; `None` when cancelled.
+fn pick_folder(owner: HWND) -> Option<String> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH};
+    unsafe {
+        let d: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        d.SetOptions(d.GetOptions().ok()? | FOS_PICKFOLDERS).ok()?;
+        d.Show(Some(owner)).ok()?;
+        let p = d.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let s = p.to_string().ok();
+        CoTaskMemFree(Some(p.0 as *const _));
+        s
+    }
 }
 
 // ---- window ----
@@ -655,6 +683,18 @@ impl Prefs {
                 _ = PostMessageW(Some(self.hwnd.get()), WM_CLOSE, WPARAM(0), LPARAM(0))
             },
             Target::Minimize => unsafe { _ = ShowWindow(self.hwnd.get(), SW_MINIMIZE) },
+            Target::Control(Control::AddFolder) => {
+                if let Some(folder) = pick_folder(self.hwnd.get()) {
+                    Self::hold_dock(2);
+                    settings::update(|s| {
+                        let mut f = settings::folders(s);
+                        if !f.iter().any(|p| p.eq_ignore_ascii_case(&folder)) {
+                            f.push(folder);
+                        }
+                        s.folders = Some(f);
+                    });
+                }
+            }
             Target::Control(c) => {
                 Self::hold_dock(2);
                 settings::update(|s| c.toggle(s));

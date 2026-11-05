@@ -401,6 +401,37 @@ impl MenuBar {
         panels::toggle(kind, centre, below);
     }
 
+    /// Right click on the bar: the settings people look for there.
+    fn bar_menu(&self) {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        let s = theme::scale(self.dpi.get());
+        let mut rc = RECT::default();
+        let mut pt = POINT::default();
+        unsafe {
+            _ = GetWindowRect(self.hwnd.get(), &mut rc);
+            _ = GetCursorPos(&mut pt);
+        }
+        let entries = vec![
+            menu::Entry::item(1, "Masaüstü ve Dock ayarları…"),
+            menu::Entry::item(2, "Tarih ve saat ayarları…"),
+            menu::Entry::item(3, "Bildirimler…"),
+            menu::Entry::item(4, "Görev Yöneticisi…"),
+            menu::Entry::Separator,
+            menu::Entry::item(5, "Menü çubuğu ve Dock'tan çık"),
+        ];
+        let open = |what: &str| unsafe {
+            ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(what), None, None, SW_SHOWNORMAL);
+        };
+        menu::show(entries, pt.x, popup::Place::Below(rc.bottom + (4.0 * s) as i32), move |id| match id {
+            1 => crate::prefs::open(),
+            2 => open("ms-settings:dateandtime"),
+            3 => open("ms-actioncenter:"),
+            4 => open("taskmgr.exe"),
+            5 => crate::quit_running(),
+            _ => {}
+        });
+    }
+
     fn refresh_clock(&self) {
         let now = clock::now();
         self.state.borrow_mut().clock = clock::text(&now);
@@ -475,6 +506,7 @@ impl Handler for MenuBar {
         match msg {
             WM_TIMER if wp.0 == TIMER_CLOCK => self.refresh_clock(),
             WM_LBUTTONUP => self.click((lp.0 & 0xFFFF) as i16 as i32),
+            WM_RBUTTONUP => self.bar_menu(),
             WM_TIMECHANGE => self.refresh_clock(),
             WM_FOREGROUND => self.set_app(HWND(wp.0 as *mut _)),
             status::WM_STATUS => self.refresh_status(wp.0),

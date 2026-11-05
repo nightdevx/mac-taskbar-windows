@@ -38,12 +38,16 @@ pub fn layout(g: Geometry, n: usize, x: Option<f32>, max: f32) -> Layout {
         .collect();
     let mut lefts = Vec::with_capacity(n);
     let mut edge = g.pad();
-    for s in &scales {
+    for (i, s) in scales.iter().enumerate() {
+        if g.sep_before(i, n) {
+            edge += g.sep_w();
+        }
         lefts.push(edge);
         edge += g.icon * s + g.gap();
     }
     // Keep the point under the pointer where it was: same slot, same fraction of it.
-    let k = (((x - g.pad() + g.gap() / 2.0) / step).floor().max(0.0) as usize).min(n - 1);
+    let centre = |i: usize| g.item_x(i) + g.icon / 2.0;
+    let k = (0..n).min_by(|a, b| (x - centre(*a)).abs().total_cmp(&(x - centre(*b)).abs())).unwrap_or(0);
     let slot_start = g.item_x(k) - g.gap() / 2.0;
     let frac = ((x - slot_start) / step).clamp(0.0, 1.0);
     let moved = lefts[k] - g.gap() / 2.0 + frac * (g.icon * scales[k] + g.gap());
@@ -80,7 +84,17 @@ pub fn hit(g: Geometry, l: &Layout, x: f32) -> Option<usize> {
 mod tests {
     use super::*;
 
-    const G: Geometry = Geometry { icon: 48.0 };
+    const G: Geometry = Geometry { icon: 48.0, sep: None };
+
+    #[test]
+    fn separator_gap_survives_magnification() {
+        let g = Geometry { icon: 48.0, sep: Some(3) };
+        for x in [100.0, 160.0, 200.0, 260.0] {
+            let l = layout(g, 5, Some(x), 1.8);
+            let (a, b) = (l.items[2], l.items[3]);
+            assert!(b.0 >= a.0 + g.icon * a.1 + g.gap() + g.sep_w() - 0.01, "x={x}");
+        }
+    }
 
     #[test]
     fn scale_peaks_at_pointer_and_fades_to_one() {

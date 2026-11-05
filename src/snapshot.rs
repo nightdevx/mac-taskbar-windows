@@ -59,7 +59,7 @@ pub fn run(path: &str) -> Result<()> {
     // Live entries: default size at rest (dark), default size magnified with the
     // pointer on the third icon (light), largest size at rest (dark).
     let default = crate::settings::Settings::default();
-    let dock_items: Vec<(icons::Icon, bool)> = dock::entries(&crate::settings::get())
+    let mut dock_items: Vec<(icons::Icon, bool)> = dock::entries(&crate::settings::get())
         .iter()
         .map(|e| {
             (
@@ -71,9 +71,17 @@ pub fn run(path: &str) -> Result<()> {
             )
         })
         .collect();
+    // Right of the separator: pinned folders and the Trash, as the live dock.
+    let apps = dock_items.len();
+    let px = (crate::settings::DOCK_ICON_MAX * 2.0 * SCALE).round() as u32;
+    for f in crate::settings::folders(&crate::settings::get()) {
+        dock_items.push((icons::load(&f, px), false));
+    }
+    dock_items.push((icons::load(r"shell:RecycleBinFolder", px), false));
     let n = dock_items.len();
     let base = dock::Geometry {
         icon: default.dock_icon,
+        sep: Some(apps),
     };
     let pointer = base.item_x(2.min(n.saturating_sub(1))) + base.icon * 0.6;
     let docks = [
@@ -82,6 +90,7 @@ pub fn run(path: &str) -> Result<()> {
         (
             dock::Geometry {
                 icon: crate::settings::DOCK_ICON_MAX,
+                sep: Some(apps),
             },
             None,
             theme::DARK,
@@ -350,6 +359,12 @@ fn draw_dock(
             &fill,
         );
         let dot = dc.CreateSolidColorBrush(&palette.text.d2d(), None)?;
+        if let Some(i) = g.sep.filter(|i| g.sep_before(*i, items.len())) {
+            let line = dc.CreateSolidColorBrush(&Rgba(palette.text.0, palette.text.1, palette.text.2, 70).d2d(), None)?;
+            let x = l.items[i].0 - g.sep_w() / 2.0 - g.gap() / 2.0;
+            let bottom = g.pad() + g.icon;
+            dc.FillRectangle(&D2D_RECT_F { left: x, top: bottom - g.icon * 0.7, right: x + 1.0, bottom }, &line);
+        }
         let props = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT {
                 format: DXGI_FORMAT_B8G8R8A8_UNORM,

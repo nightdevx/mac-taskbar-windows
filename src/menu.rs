@@ -295,8 +295,10 @@ impl Menu {
     }
 
     fn close(&self, picked: Option<u32>) {
-        self.popup().hide();
+        // Take the pick first: hiding deactivates the menu, and that nested
+        // close(None) would otherwise drop the callback before it runs.
         let pick = self.pick.borrow_mut().take();
+        self.popup().hide();
         if let (Some(f), Some(id)) = (pick, picked) {
             f(id);
         }
