@@ -6,6 +6,11 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use windows::Foundation::TimeSpan;
+use windows::UI::Composition::{
+    CompositionDrawingSurface, CompositionGeometricClip, CompositionRoundedRectangleGeometry, CompositionSurfaceBrush,
+    Compositor, ContainerVisual, CubicBezierEasingFunction, ImplicitAnimationCollection, SpriteVisual,
+};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
@@ -19,8 +24,8 @@ use windows::Win32::UI::Shell::{
     SHGetKnownFolderItem, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{HSTRING, PCWSTR, Result, w};
-use windows_numerics::Vector2;
+use windows::core::{HSTRING, Interface, PCWSTR, Result, w};
+use windows_numerics::{Vector2, Vector3};
 
 use crate::gfx::{self, Gfx, Label};
 use crate::icons::{self, Loader};
@@ -32,6 +37,8 @@ const CLASS: PCWSTR = w!("TaskbarLaunchpad");
 const WM_ICON: u32 = WM_APP + 1;
 /// The app list, read on a worker thread (enumerating the Apps folder takes ~1 s).
 const WM_APPS: u32 = WM_APP + 2;
+/// Build the neighbouring pages after the current one is on screen.
+const WM_NEIGHBOURS: u32 = WM_APP + 3;
 pub const COLS: usize = 7;
 pub const ROWS: usize = 5;
 pub const PER_PAGE: usize = COLS * ROWS;
@@ -242,6 +249,8 @@ pub struct View<'a> {
     /// Listing hidden apps instead of visible ones.
     pub show_hidden: bool,
     pub hidden_count: usize,
+    /// Live Launchpad: apps are composition tiles, the surface holds the rest.
+    pub chrome_only: bool,
 }
 
 pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &View) -> Result<()> {
@@ -306,7 +315,7 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &Vie
             let l = Label::new(dwrite, msg, &f.text)?;
             l.draw_text(dc, (w - l.width) / 2.0, h, f.cap, &dim);
         }
-        for (i, app) in apps.iter().enumerate() {
+        for (i, app) in apps.iter().enumerate().filter(|_| !v.chrome_only) {
             let (c, r) = ((i % COLS) as f32, (i / COLS) as f32);
             let cx = g.left + (c + 0.5) * g.cell_w;
             let top = g.top + r * g.cell_h + 6.0;
@@ -358,26 +367,71 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &Vie
 }
 
 
+/// Page after a drag of `drag` px (negative = content pulled left): a fifth of
+/// the screen turns the page, like macOS.
+pub fn snap(page: usize, n_pages: usize, drag: f32, width: f32) -> usize {
+    let last = n_pages.saturating_sub(1);
+    if drag < -width * 0.2 {
+        (page + 1).min(last)
+    } else if drag > width * 0.2 {
+        page.saturating_sub(1)
+    } else {
+        page.min(last)
+    }
+}
+
+const TIMER_SNAP: usize = 1;
+const TIMER_CLOSE: usize = 2;
+const SLIDE_MS: i64 = 380;
+const OPEN_MS: i64 = 320;
+const CLOSE_MS: i64 = 200;
+const BADGE: f32 = 24.0;
+
+/// One app on a page: icon, name and (while editing) a selection badge.
+struct Tile {
+    id: String,
+    source: String,
+    root: ContainerVisual,
+    icon: SpriteVisual,
+    badge: SpriteVisual,
+}
+
+struct Comp {
+    /// All pages side by side; its offset picks the page (animated slide).
+    pages: ContainerVisual,
+    hover: SpriteVisual,
+    slide: ImplicitAnimationCollection,
+    still: ImplicitAnimationCollection,
+    badge_on: CompositionSurfaceBrush,
+    badge_off: CompositionSurfaceBrush,
+}
+
 struct Launchpad {
     popup: OnceCell<Popup>,
     gfx: Rc<Gfx>,
-    label: IDWriteTextFormat,
-    text: IDWriteTextFormat,
-    icons_font: IDWriteTextFormat,
-    cap: f32,
+    fonts: Fonts,
     loader: OnceCell<Loader>,
+    comp: RefCell<Option<Comp>>,
     apps: RefCell<Vec<App>>,
     shown: RefCell<Vec<usize>>,
     query: RefCell<String>,
+    page: Cell<usize>,
+    hover: Cell<Option<usize>>,
     editing: Cell<bool>,
     selected: RefCell<HashSet<String>>,
     show_hidden: Cell<bool>,
-    page: Cell<usize>,
-    hover: Cell<Option<usize>>,
-    icons: RefCell<HashMap<String, icons::Icon>>,
+    /// Icon brushes by source, kept between openings so icons show at once.
+    brushes: RefCell<HashMap<String, CompositionSurfaceBrush>>,
     requested: RefCell<HashSet<String>>,
+    tiles: RefCell<HashMap<usize, Vec<Tile>>>,
     size: Cell<(f32, f32)>,
+    scale: Cell<f32>,
     icon_px: Cell<u32>,
+    /// Horizontal drag of the pages in px (two-finger scroll or three-finger swipe).
+    drag: Cell<f32>,
+    dragging: Cell<bool>,
+    closing: Cell<bool>,
+    touch: RefCell<crate::touchpad::Swipe>,
 }
 
 thread_local! {
@@ -388,17 +442,17 @@ fn get() -> Option<&'static Launchpad> {
     LP.with(|l| l.get().copied())
 }
 
+fn ease(c: &Compositor) -> Result<CubicBezierEasingFunction> {
+    c.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })
+}
+
 pub fn init(gfx: Rc<Gfx>) -> Result<()> {
-    let label = gfx::text_format(&gfx.dwrite, theme::TEXT_FONT, 13.0, DWRITE_FONT_WEIGHT_REGULAR)?;
-    unsafe { label.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)? };
     let lp: &'static Launchpad = Box::leak(Box::new(Launchpad {
-        label,
-        text: gfx::text_format(&gfx.dwrite, theme::TEXT_FONT, 14.0, DWRITE_FONT_WEIGHT_REGULAR)?,
-        icons_font: gfx::text_format(&gfx.dwrite, theme::ICON_FONT, 14.0, DWRITE_FONT_WEIGHT_REGULAR)?,
-        cap: gfx::cap_height(&gfx.dwrite, theme::TEXT_FONT, 14.0)?,
+        fonts: Fonts::new(&gfx.dwrite)?,
         gfx: gfx.clone(),
         popup: OnceCell::new(),
         loader: OnceCell::new(),
+        comp: RefCell::new(None),
         apps: RefCell::new(Vec::new()),
         shown: RefCell::new(Vec::new()),
         query: RefCell::new(String::new()),
@@ -407,15 +461,26 @@ pub fn init(gfx: Rc<Gfx>) -> Result<()> {
         editing: Cell::new(false),
         selected: RefCell::new(HashSet::new()),
         show_hidden: Cell::new(false),
-        icons: RefCell::new(HashMap::new()),
+        brushes: RefCell::new(HashMap::new()),
         requested: RefCell::new(HashSet::new()),
+        tiles: RefCell::new(HashMap::new()),
         size: Cell::new((0.0, 0.0)),
+        scale: Cell::new(1.0),
         icon_px: Cell::new(64),
+        drag: Cell::new(0.0),
+        dragging: Cell::new(false),
+        closing: Cell::new(false),
+        touch: RefCell::new(crate::touchpad::Swipe::default()),
     }));
-    let popup = Popup::create(gfx, CLASS, true, lp)?;
-    _ = lp.loader.set(Loader::start(popup.hwnd, WM_ICON));
+    let popup = Popup::create(gfx.clone(), CLASS, true, lp)?;
+    // Three icon workers: a page of 35 icons arrives in a third of the time.
+    _ = lp.loader.set(Loader::pool(popup.hwnd, WM_ICON, 3));
+    let layer = popup.layer().expect("popup layer");
     _ = lp.popup.set(popup);
+    lp.init_visuals(&layer)?;
     LP.with(|l| _ = l.set(lp));
+    // Read the app list now, in the background, so the first opening is instant.
+    refresh_apps(lp.popup().hwnd);
     Ok(())
 }
 
@@ -437,21 +502,7 @@ pub fn toggle() {
     if lp.popup().visible() {
         return lp.close();
     }
-    let (monitor, dpi) = window::primary_monitor();
-    let s = theme::scale(dpi);
-    let (w, h) = ((monitor.right - monitor.left) as f32 / s, (monitor.bottom - monitor.top) as f32 / s);
-    lp.size.set((w, h));
-    lp.icon_px.set((grid(w, h).icon * s).round() as u32);
-    // Last known list at once; a fresh one follows from the worker.
-    refresh_apps(lp.popup().hwnd);
-    lp.query.borrow_mut().clear();
-    lp.page.set(0);
-    lp.hover.set(None);
-    lp.refilter();
-    let pivot = (monitor.bottom - monitor.top) / 2;
-    lp.popup().set_tint(Rgba(18, 18, 22, 120));
-    lp.popup().show_rect(monitor, dpi, 0.0, pivot, |dc| lp.draw(dc));
-    lp.popup().set_tint(Rgba(18, 18, 22, 120));
+    lp.open();
 }
 
 impl Launchpad {
@@ -459,11 +510,156 @@ impl Launchpad {
         self.popup.get().expect("launchpad popup")
     }
 
+    fn init_visuals(&self, layer: &ContainerVisual) -> Result<()> {
+        let c = &self.gfx.compositor;
+        let pages = c.CreateContainerVisual()?;
+        layer.Children()?.InsertAtTop(&pages)?;
+        let hover = c.CreateSpriteVisual()?;
+        hover.SetBrush(&c.CreateColorBrushWithColor(Rgba(255, 255, 255, 34).ui())?)?;
+        let shape = c.CreateRoundedRectangleGeometry()?;
+        shape.SetCornerRadius(Vector2 { X: 14.0, Y: 14.0 })?;
+        hover.SetClip(&c.CreateGeometricClipWithGeometry(&shape)?)?;
+        hover.SetIsVisible(false)?;
+        pages.Children()?.InsertAtBottom(&hover)?;
+
+        let slide = c.CreateImplicitAnimationCollection()?;
+        let a = c.CreateVector3KeyFrameAnimation()?;
+        a.SetTarget(&HSTRING::from("Offset"))?;
+        a.InsertExpressionKeyFrameWithEasingFunction(1.0, &HSTRING::from("this.FinalValue"), &ease(c)?)?;
+        a.SetDuration(TimeSpan { Duration: SLIDE_MS * 10_000 })?;
+        slide.Insert(&HSTRING::from("Offset"), &a)?;
+        let still = c.CreateImplicitAnimationCollection()?;
+
+        // Selection badges, drawn once: filled with a tick, or an empty ring.
+        let (on, off) = (self.gfx.surface(1, 1)?, self.gfx.surface(1, 1)?);
+        let badge_on = c.CreateSurfaceBrushWithSurface(&on)?;
+        let badge_off = c.CreateSurfaceBrushWithSurface(&off)?;
+        *self.comp.borrow_mut() = Some(Comp { pages, hover, slide, still, badge_on, badge_off });
+        let _ = (on, off);
+        Ok(())
+    }
+
+    fn draw_badges(&self) {
+        let comp = self.comp.borrow();
+        let Some(c) = comp.as_ref() else { return };
+        let s = self.scale.get();
+        let px = (BADGE * s).ceil() as u32;
+        for (brush, selected) in [(&c.badge_on, true), (&c.badge_off, false)] {
+            let Ok(surface) = brush.Surface().and_then(|x| x.cast::<CompositionDrawingSurface>()) else { continue };
+            let accent = theme::accent();
+            let icons = &self.fonts.icons;
+            let dwrite = &self.gfx.dwrite;
+            let r = self.gfx.resize(&surface, px, px).and_then(|_| {
+                self.gfx.draw(&surface, s, |dc| unsafe {
+                    let e = D2D1_ELLIPSE { point: Vector2 { X: BADGE / 2.0, Y: BADGE / 2.0 }, radiusX: 10.5, radiusY: 10.5 };
+                    let white = dc.CreateSolidColorBrush(&Rgba(255, 255, 255, 235).d2d(), None)?;
+                    if selected {
+                        dc.FillEllipse(&e, &dc.CreateSolidColorBrush(&accent.d2d(), None)?);
+                        dc.DrawEllipse(&e, &white, 1.5, None);
+                        let mark = Label::new(dwrite, "\u{E73E}", icons)?;
+                        mark.draw(dc, (BADGE - mark.width) / 2.0, BADGE, &white);
+                    } else {
+                        dc.FillEllipse(&e, &dc.CreateSolidColorBrush(&Rgba(0, 0, 0, 110).d2d(), None)?);
+                        dc.DrawEllipse(&e, &white, 1.5, None);
+                    }
+                    Ok(())
+                })
+            });
+            if let Err(e) = r {
+                crate::log::error(&format!("launchpad badge: {e}"));
+            }
+        }
+    }
+
+    fn open(&self) {
+        let (monitor, dpi) = window::primary_monitor();
+        let s = theme::scale(dpi);
+        let (w, h) = ((monitor.right - monitor.left) as f32 / s, (monitor.bottom - monitor.top) as f32 / s);
+        let new_px = (grid(w, h).icon * s).round() as u32;
+        if new_px != self.icon_px.get() {
+            // Different screen or scale: cached icons are the wrong size.
+            self.brushes.borrow_mut().clear();
+            self.requested.borrow_mut().clear();
+        }
+        self.size.set((w, h));
+        self.scale.set(s);
+        self.icon_px.set(new_px);
+        self.closing.set(false);
+        self.query.borrow_mut().clear();
+        self.editing.set(false);
+        self.selected.borrow_mut().clear();
+        self.show_hidden.set(false);
+        self.page.set(0);
+        self.hover.set(None);
+        self.drag.set(0.0);
+        self.draw_badges();
+        self.refilter();
+        let pivot = (monitor.bottom - monitor.top) / 2;
+        self.popup().set_tint(Rgba(18, 18, 22, 120));
+        self.popup().show_rect(monitor, dpi, 0.0, pivot, |dc| self.draw_chrome(dc));
+        self.popup().set_tint(Rgba(18, 18, 22, 120));
+        self.animate_pages(true);
+        crate::touchpad::listen(self.popup().hwnd, true);
+        refresh_apps(self.popup().hwnd); // picks up newly installed apps
+    }
+
+    /// macOS: icons zoom in from slightly larger and fade in; reversed on close.
+    fn animate_pages(&self, opening: bool) {
+        let comp = self.comp.borrow();
+        let Some(c) = comp.as_ref() else { return };
+        let comp_ = &self.gfx.compositor;
+        let (w, h) = self.size.get();
+        let s = self.scale.get();
+        let run = || -> Result<()> {
+            let ms = if opening { OPEN_MS } else { CLOSE_MS };
+            let (from, to) = if opening { (1.1, 1.0) } else { (1.0, 1.08) };
+            let zoom = comp_.CreateVector3KeyFrameAnimation()?;
+            zoom.InsertKeyFrame(0.0, Vector3 { X: from, Y: from, Z: 1.0 })?;
+            zoom.InsertKeyFrameWithEasingFunction(1.0, Vector3 { X: to, Y: to, Z: 1.0 }, &ease(comp_)?)?;
+            zoom.SetDuration(TimeSpan { Duration: ms * 10_000 })?;
+            let fade = comp_.CreateScalarKeyFrameAnimation()?;
+            fade.InsertKeyFrame(0.0, if opening { 0.0 } else { 1.0 })?;
+            fade.InsertKeyFrame(1.0, if opening { 1.0 } else { 0.0 })?;
+            fade.SetDuration(TimeSpan { Duration: ms * 10_000 })?;
+            // Zoom around the screen centre of the current page.
+            let page_x = self.page.get() as f32 * w * s;
+            c.pages.SetCenterPoint(Vector3 { X: page_x + w * s / 2.0, Y: h * s / 2.0, Z: 0.0 })?;
+            c.pages.StartAnimation(&HSTRING::from("Scale"), &zoom)?;
+            c.pages.StartAnimation(&HSTRING::from("Opacity"), &fade)
+        };
+        _ = run();
+    }
+
     fn close(&self) {
+        if self.closing.replace(true) {
+            return;
+        }
+        crate::touchpad::listen(self.popup().hwnd, false);
+        self.animate_pages(false);
+        self.popup().fade_out(CLOSE_MS);
+        unsafe { SetTimer(Some(self.popup().hwnd), TIMER_CLOSE, CLOSE_MS as u32, None) };
+    }
+
+    fn finish_close(&self) {
         self.popup().hide_and_release();
-        // Free the icons: Launchpad is rare, memory is not.
-        self.icons.borrow_mut().clear();
-        self.requested.borrow_mut().clear();
+        self.clear_tiles();
+        if let Some(c) = self.comp.borrow().as_ref() {
+            _ = c.pages.SetImplicitAnimations(&c.still);
+            _ = c.pages.SetOffset(Vector3::default());
+            _ = c.hover.SetIsVisible(false);
+        }
+        self.closing.set(false);
+    }
+
+    fn clear_tiles(&self) {
+        let comp = self.comp.borrow();
+        for (_, tiles) in self.tiles.borrow_mut().drain() {
+            for t in tiles {
+                if let Some(c) = comp.as_ref() {
+                    _ = c.pages.Children().and_then(|ch| ch.Remove(&t.root));
+                }
+            }
+        }
     }
 
     fn refilter(&self) {
@@ -471,65 +667,228 @@ impl Launchpad {
         let shown = listed(&self.apps.borrow(), &self.query.borrow(), &hidden, self.show_hidden.get());
         *self.shown.borrow_mut() = shown;
         self.page.set(self.page.get().min(pages(self.shown.borrow().len()) - 1));
-        self.request_page();
+        self.clear_tiles();
+        self.place_pages(false);
+    }
+
+    fn apps_on(&self, page: usize) -> Vec<App> {
+        let apps = self.apps.borrow();
+        self.shown.borrow().iter().skip(page * PER_PAGE).take(PER_PAGE).map(|i| apps[*i].clone()).collect()
     }
 
     fn page_apps(&self) -> Vec<App> {
-        let apps = self.apps.borrow();
-        self.shown.borrow().iter().skip(self.page.get() * PER_PAGE).take(PER_PAGE).map(|i| apps[*i].clone()).collect()
+        self.apps_on(self.page.get())
     }
 
-    /// Asks the worker for this page's icons.
-    fn request_page(&self) {
+    /// Builds tiles for the current page and its neighbours, moves the pages
+    /// container to the current page (sliding when `animate`) and asks for icons.
+    fn place_pages(&self, animate: bool) {
+        let p = self.page.get();
+        self.ensure_page(p);
+        unsafe { _ = PostMessageW(Some(self.popup().hwnd), WM_NEIGHBOURS, WPARAM(0), LPARAM(0)) };
+        let (w, _) = self.size.get();
+        let s = self.scale.get();
+        if let Some(c) = self.comp.borrow().as_ref() {
+            _ = c.pages.SetImplicitAnimations(if animate { &c.slide } else { &c.still });
+            _ = c.pages.SetOffset(Vector3 { X: -(p as f32) * w * s, Y: 0.0, Z: 0.0 });
+            _ = c.hover.SetIsVisible(false);
+        }
+        self.hover.set(None);
+        self.request(p);
+        self.request(p + 1);
+        self.redraw_chrome();
+    }
+
+    fn ensure_page(&self, page: usize) {
+        if self.tiles.borrow().contains_key(&page) {
+            return;
+        }
+        let comp = self.comp.borrow();
+        let Some(c) = comp.as_ref() else { return };
+        let (w, h) = self.size.get();
+        let g = grid(w, h);
+        let s = self.scale.get();
+        let cmp = &self.gfx.compositor;
+        let mut tiles = Vec::new();
+        for (i, app) in self.apps_on(page).into_iter().enumerate() {
+            let make = || -> Result<Tile> {
+                let (col, row) = ((i % COLS) as f32, (i / COLS) as f32);
+                let left = page as f32 * w + g.left + col * g.cell_w;
+                let top = g.top + row * g.cell_h + 6.0;
+                let root = cmp.CreateContainerVisual()?;
+                root.SetOffset(Vector3 { X: (left * s).round(), Y: (top * s).round(), Z: 0.0 })?;
+                let icon = cmp.CreateSpriteVisual()?;
+                let ipx = (g.icon * s).round();
+                icon.SetSize(Vector2 { X: ipx, Y: ipx })?;
+                icon.SetOffset(Vector3 { X: (((g.cell_w - g.icon) / 2.0) * s).round(), Y: 0.0, Z: 0.0 })?;
+                let source = app.icon_source();
+                if let Some(b) = self.brushes.borrow().get(&source) {
+                    icon.SetBrush(b)?;
+                }
+                let label = cmp.CreateSpriteVisual()?;
+                let (lw, lh) = (g.cell_w - 12.0, 20.0);
+                let surface = self.gfx.surface((lw * s).ceil() as u32, (lh * s).ceil() as u32)?;
+                let name = app.name.clone();
+                let (label_fmt, dwrite) = (&self.fonts.label, &self.gfx.dwrite);
+                self.gfx.draw(&surface, s, |dc| unsafe {
+                    let wide: Vec<u16> = name.encode_utf16().collect();
+                    let layout = dwrite.CreateTextLayout(&wide, label_fmt, lw, lh)?;
+                    layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+                    let trim = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, ..Default::default() };
+                    layout.SetTrimming(&trim, &dwrite.CreateEllipsisTrimmingSign(label_fmt)?)?;
+                    let shadow = dc.CreateSolidColorBrush(&Rgba(0, 0, 0, 110).d2d(), None)?;
+                    let white = dc.CreateSolidColorBrush(&Rgba(255, 255, 255, 240).d2d(), None)?;
+                    dc.DrawTextLayout(Vector2 { X: 0.0, Y: 1.0 }, &layout, &shadow, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                    dc.DrawTextLayout(Vector2 { X: 0.0, Y: 0.0 }, &layout, &white, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                    Ok(())
+                })?;
+                label.SetBrush(&cmp.CreateSurfaceBrushWithSurface(&surface)?)?;
+                label.SetSize(Vector2 { X: (lw * s).ceil(), Y: (lh * s).ceil() })?;
+                label.SetOffset(Vector3 { X: (6.0 * s).round(), Y: ((g.icon + 8.0) * s).round(), Z: 0.0 })?;
+                let badge = cmp.CreateSpriteVisual()?;
+                let bpx = (BADGE * s).ceil();
+                badge.SetSize(Vector2 { X: bpx, Y: bpx })?;
+                badge.SetOffset(Vector3 { X: (((g.cell_w - g.icon) / 2.0 - BADGE / 2.0 + 4.0) * s).round(), Y: ((4.0 - BADGE / 2.0) * s).round(), Z: 0.0 })?;
+                badge.SetBrush(if self.selected.borrow().contains(&app.id) { &c.badge_on } else { &c.badge_off })?;
+                badge.SetIsVisible(self.editing.get())?;
+                root.Children()?.InsertAtTop(&icon)?;
+                root.Children()?.InsertAtTop(&label)?;
+                root.Children()?.InsertAtTop(&badge)?;
+                c.pages.Children()?.InsertAtTop(&root)?;
+                Ok(Tile { id: app.id.clone(), source, root, icon, badge })
+            };
+            match make() {
+                Ok(t) => tiles.push(t),
+                Err(e) => crate::log::error(&format!("launchpad tile: {e}")),
+            }
+        }
+        drop(comp);
+        self.tiles.borrow_mut().insert(page, tiles);
+    }
+
+    /// Asks the workers for a page's icons that are not cached yet.
+    fn request(&self, page: usize) {
         let Some(loader) = self.loader.get() else { return };
-        for app in self.page_apps() {
+        for app in self.apps_on(page) {
             let src = app.icon_source();
-            if self.requested.borrow_mut().insert(src.clone()) {
+            if !self.brushes.borrow().contains_key(&src) && self.requested.borrow_mut().insert(src.clone()) {
                 loader.request(&src, self.icon_px.get());
             }
         }
     }
 
-    fn redraw(&self) {
-        self.popup().redraw(|dc| self.draw(dc));
+    fn on_icon(&self, icon: Box<icons::Icon>) {
+        if icon.pixels.is_empty() || icon.size != self.icon_px.get() {
+            return;
+        }
+        let Ok(brush) = self.gfx.icon_brush(&icon) else { return };
+        for t in self.tiles.borrow().values().flatten().filter(|t| t.source == icon.source) {
+            _ = t.icon.SetBrush(&brush);
+        }
+        self.brushes.borrow_mut().insert(icon.source.clone(), brush);
+    }
+
+    fn draw_chrome(&self, dc: &ID2D1DeviceContext) -> Result<()> {
+        let page = self.page_apps();
+        let none = HashMap::new();
+        let view = View {
+            size: self.size.get(),
+            query: &self.query.borrow(),
+            apps: &page,
+            icons: &none,
+            loading: self.apps.borrow().is_empty(),
+            page: self.page.get(),
+            pages: pages(self.shown.borrow().len()),
+            hover: None,
+            scale: self.scale.get(),
+            editing: self.editing.get(),
+            selected: &self.selected.borrow(),
+            show_hidden: self.show_hidden.get(),
+            hidden_count: crate::settings::get().hidden_apps.len(),
+            chrome_only: true,
+        };
+        draw(dc, &self.gfx.dwrite, &self.fonts, &view)
+    }
+
+    fn redraw_chrome(&self) {
+        if self.popup().visible() {
+            self.popup().redraw(|dc| self.draw_chrome(dc));
+        }
     }
 
     fn set_page(&self, page: usize) {
         let n = pages(self.shown.borrow().len());
         let page = page.min(n - 1);
-        if page != self.page.get() {
-            self.page.set(page);
-            self.hover.set(None);
-            self.request_page();
-            self.redraw();
+        self.page.set(page);
+        self.place_pages(true);
+    }
+
+    // ---- dragging (two-finger scroll, three-finger swipe) ----
+
+    fn drag_by(&self, dx: f32) {
+        let (w, _) = self.size.get();
+        let s = self.scale.get();
+        let width = w * s;
+        if !self.dragging.replace(true) {
+            self.drag.set(0.0);
+        }
+        // Rubber band at the first and last page.
+        let n = pages(self.shown.borrow().len());
+        let mut d = (self.drag.get() + dx).clamp(-width, width);
+        let p = self.page.get();
+        if (p == 0 && d > 0.0) || (p + 1 >= n && d < 0.0) {
+            d = d.signum() * (d.abs() / 3.0).min(width * 0.15);
+        }
+        self.drag.set(d);
+        if let Some(c) = self.comp.borrow().as_ref() {
+            _ = c.pages.SetImplicitAnimations(&c.still);
+            _ = c.pages.SetOffset(Vector3 { X: -(p as f32) * width + d, Y: 0.0, Z: 0.0 });
+            _ = c.hover.SetIsVisible(false);
+        }
+        unsafe { SetTimer(Some(self.popup().hwnd), TIMER_SNAP, 140, None) };
+    }
+
+    fn release_drag(&self) {
+        if !self.dragging.replace(false) {
+            return;
+        }
+        let (w, _) = self.size.get();
+        let width = w * self.scale.get();
+        let target = snap(self.page.get(), pages(self.shown.borrow().len()), self.drag.take(), width);
+        self.set_page(target);
+    }
+
+    fn set_hover(&self, h: Option<usize>) {
+        if self.hover.replace(h) == h {
+            return;
+        }
+        let comp = self.comp.borrow();
+        let Some(c) = comp.as_ref() else { return };
+        match h {
+            Some(i) if !self.dragging.get() => {
+                let (w, hh) = self.size.get();
+                let g = grid(w, hh);
+                let s = self.scale.get();
+                let (col, row) = ((i % COLS) as f32, (i / COLS) as f32);
+                let left = self.page.get() as f32 * w + g.left + col * g.cell_w + 6.0;
+                let top = g.top + row * g.cell_h + 2.0;
+                let size = Vector2 { X: ((g.cell_w - 12.0) * s).round(), Y: ((g.cell_h - 6.0) * s).round() };
+                _ = c.hover.SetSize(size);
+                if let Ok(clip) = c.hover.Clip().and_then(|x| x.cast::<CompositionGeometricClip>())
+                    && let Ok(geo) = clip.Geometry().and_then(|x| x.cast::<CompositionRoundedRectangleGeometry>())
+                {
+                    _ = geo.SetSize(size);
+                }
+                _ = c.hover.SetOffset(Vector3 { X: (left * s).round(), Y: (top * s).round(), Z: 0.0 });
+                _ = c.hover.SetIsVisible(true);
+            }
+            _ => _ = c.hover.SetIsVisible(false),
         }
     }
 
     fn launch(&self, app: &App) {
-        self.close();
         unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(app.source()), None, None, SW_SHOWNORMAL) };
-    }
-
-    fn draw(&self, dc: &ID2D1DeviceContext) -> Result<()> {
-        let fonts = Fonts { label: self.label.clone(), text: self.text.clone(), icons: self.icons_font.clone(), cap: self.cap };
-        let icons = self.icons.borrow();
-        let page = self.page_apps();
-        let view = View {
-            size: self.size.get(),
-            query: &self.query.borrow(),
-            apps: &page,
-            icons: &icons,
-            loading: self.apps.borrow().is_empty(),
-            page: self.page.get(),
-            pages: pages(self.shown.borrow().len()),
-            hover: self.hover.get(),
-            scale: self.popup().scale(),
-            editing: self.editing.get(),
-            selected: &self.selected.borrow(),
-            show_hidden: self.show_hidden.get(),
-            hidden_count: crate::settings::get().hidden_apps.len(),
-        };
-        draw(dc, &self.gfx.dwrite, &fonts, &view)
+        self.close();
     }
 
     fn click(&self, x: f32, y: f32) {
@@ -541,12 +900,16 @@ impl Launchpad {
         if let Some(i) = hit(grid(w, h), page.len(), x, y) {
             if self.editing.get() {
                 let id = page[i].id.clone();
-                let mut sel = self.selected.borrow_mut();
-                if !sel.remove(&id) {
-                    sel.insert(id);
+                let on = {
+                    let mut sel = self.selected.borrow_mut();
+                    if sel.remove(&id) { false } else { sel.insert(id.clone()) }
+                };
+                if let Some(c) = self.comp.borrow().as_ref() {
+                    for t in self.tiles.borrow().values().flatten().filter(|t| t.id == id) {
+                        _ = t.badge.SetBrush(if on { &c.badge_on } else { &c.badge_off });
+                    }
                 }
-                drop(sel);
-                return self.redraw();
+                return self.redraw_chrome();
             }
             return self.launch(&page[i]);
         }
@@ -559,25 +922,36 @@ impl Launchpad {
         }
     }
 
+    fn set_editing(&self, on: bool) {
+        self.editing.set(on);
+        self.selected.borrow_mut().clear();
+        if let Some(c) = self.comp.borrow().as_ref() {
+            for t in self.tiles.borrow().values().flatten() {
+                _ = t.badge.SetBrush(&c.badge_off);
+                _ = t.badge.SetIsVisible(on);
+            }
+        }
+    }
+
     fn press(&self, b: Button) {
         match b {
             Button::Edit => {
-                self.editing.set(!self.editing.get());
-                self.selected.borrow_mut().clear();
+                self.set_editing(!self.editing.get());
+                self.redraw_chrome();
             }
             Button::Apply => {
                 let picked: Vec<String> = self.selected.borrow_mut().drain().collect();
                 self.set_hidden(&picked, !self.show_hidden.get());
-                self.editing.set(false);
+                self.set_editing(false);
+                self.refilter();
             }
             Button::HiddenView => {
                 self.show_hidden.set(!self.show_hidden.get());
-                self.selected.borrow_mut().clear();
+                self.set_editing(false);
                 self.page.set(0);
+                self.refilter();
             }
         }
-        self.refilter();
-        self.redraw();
     }
 
     /// Hides (or shows again) `ids` in Launchpad and saves it.
@@ -608,7 +982,6 @@ impl Launchpad {
             if pick == 1 {
                 lp.set_hidden(&[id], hide);
                 lp.refilter();
-                lp.redraw();
             }
         });
     }
@@ -622,9 +995,7 @@ impl Launchpad {
             _ => return,
         }
         self.page.set(0);
-        self.hover.set(None);
         self.refilter();
-        self.redraw();
     }
 }
 
@@ -637,24 +1008,58 @@ impl Handler for Launchpad {
                     *self.apps.borrow_mut() = *list;
                     if self.popup().visible() {
                         self.refilter();
-                        self.redraw();
+                    } else {
+                        // Warm the first page's icons while nobody is looking.
+                        let (monitor, dpi) = window::primary_monitor();
+                        let s = theme::scale(dpi);
+                        let (w, h) = ((monitor.right - monitor.left) as f32 / s, (monitor.bottom - monitor.top) as f32 / s);
+                        self.size.set((w, h));
+                        self.scale.set(s);
+                        self.icon_px.set((grid(w, h).icon * s).round() as u32);
+                        let hidden = crate::settings::get().hidden_apps;
+                        *self.shown.borrow_mut() = listed(&self.apps.borrow(), "", &hidden, false);
+                        self.request(0);
                     }
                 }
             }
-            WM_ICON => {
-                let icon = unsafe { icons::take(lp) };
-                if self.popup().visible() {
-                    self.icons.borrow_mut().insert(icon.source.clone(), *icon);
-                    self.redraw();
+            WM_ICON => self.on_icon(unsafe { icons::take(lp) }),
+            WM_NEIGHBOURS if self.popup().visible() && !self.closing.get() => {
+                let p = self.page.get();
+                let n = pages(self.shown.borrow().len());
+                for q in [p.saturating_sub(1), (p + 1).min(n - 1)] {
+                    self.ensure_page(q);
                 }
+            }
+            WM_INPUT => {
+                let mut touch = self.touch.borrow_mut();
+                match touch.feed(lp) {
+                    crate::touchpad::Event::Move(dx_norm) => {
+                        drop(touch);
+                        let (w, _) = self.size.get();
+                        self.drag_by(dx_norm * w * self.scale.get() * 1.5);
+                    }
+                    crate::touchpad::Event::End => {
+                        drop(touch);
+                        self.release_drag();
+                    }
+                    crate::touchpad::Event::None => {}
+                }
+                return None; // DefWindowProc cleans up the raw input buffer
+            }
+            WM_TIMER if wp.0 == TIMER_SNAP => {
+                unsafe { _ = KillTimer(Some(self.popup().hwnd), TIMER_SNAP) };
+                if !self.touch.borrow().active() {
+                    self.release_drag();
+                }
+            }
+            WM_TIMER if wp.0 == TIMER_CLOSE => {
+                unsafe { _ = KillTimer(Some(self.popup().hwnd), TIMER_CLOSE) };
+                self.finish_close();
             }
             WM_MOUSEMOVE => {
                 let (x, y) = popup::point(lp, self.popup().scale());
                 let (w, h) = self.size.get();
-                let h_ = hit(grid(w, h), self.page_apps().len(), x, y);
-                if self.hover.replace(h_) != h_ {
-                    self.redraw();
-                }
+                self.set_hover(hit(grid(w, h), self.page_apps().len(), x, y));
             }
             WM_LBUTTONUP => {
                 let (x, y) = popup::point(lp, self.popup().scale());
@@ -663,6 +1068,11 @@ impl Handler for Launchpad {
             WM_RBUTTONUP => {
                 let (x, y) = popup::point(lp, self.popup().scale());
                 self.quick_menu(x, y);
+            }
+            // Two-finger horizontal scroll on a touchpad: the pages follow the fingers.
+            WM_MOUSEHWHEEL => {
+                let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as f32;
+                self.drag_by(-delta * self.scale.get());
             }
             WM_MOUSEWHEEL => {
                 let delta = ((wp.0 >> 16) & 0xFFFF) as i16;
@@ -684,7 +1094,6 @@ impl Handler for Launchpad {
                     } else {
                         self.query.borrow_mut().clear();
                         self.refilter();
-                        self.redraw();
                     }
                 } else if vk == VK_RIGHT.0 {
                     self.set_page(self.page.get() + 1);
@@ -702,6 +1111,7 @@ impl Handler for Launchpad {
         Some(LRESULT(0))
     }
 }
+
 
 /// Dock button art: a light tile with a 3 x 3 grid of coloured squares.
 pub fn draw_button(dc: &ID2D1DeviceContext, size: f32) -> Result<()> {
@@ -739,6 +1149,15 @@ pub fn draw_button(dc: &ID2D1DeviceContext, size: f32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snap_turns_after_a_fifth() {
+        assert_eq!(snap(0, 3, -100.0, 1000.0), 0);
+        assert_eq!(snap(0, 3, -250.0, 1000.0), 1);
+        assert_eq!(snap(1, 3, 250.0, 1000.0), 0);
+        assert_eq!(snap(2, 3, -900.0, 1000.0), 2);
+        assert_eq!(snap(0, 3, 900.0, 1000.0), 0);
+    }
 
     fn app(name: &str) -> App {
         App { name: name.into(), id: name.into() }

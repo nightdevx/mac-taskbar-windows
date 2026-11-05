@@ -38,6 +38,8 @@ struct Comp {
     shape: CompositionRoundedRectangleGeometry,
     content: SpriteVisual,
     surface: CompositionDrawingSurface,
+    /// Above the drawn content: callers add their own visuals here.
+    layer: ContainerVisual,
 }
 
 pub struct Popup {
@@ -79,6 +81,9 @@ impl Popup {
         let content = c.CreateSpriteVisual()?;
         content.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
         frame.Children()?.InsertAtTop(&content)?;
+        let layer = c.CreateContainerVisual()?;
+        layer.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
+        frame.Children()?.InsertAtTop(&layer)?;
         root.Children()?.InsertAtTop(&frame)?;
         target.SetRoot(&root)?;
         let comp = Comp {
@@ -88,6 +93,7 @@ impl Popup {
             shape,
             content,
             surface,
+            layer,
         };
         Ok(Popup {
             hwnd,
@@ -225,6 +231,24 @@ impl Popup {
         {
             crate::log::error(&format!("popup draw: {e}"));
         }
+    }
+
+    pub fn layer(&self) -> Option<ContainerVisual> {
+        self.comp.borrow().as_ref().map(|c| c.layer.clone())
+    }
+
+    /// Fades the whole popup out over `ms` (hide it after that).
+    pub fn fade_out(&self, ms: i64) {
+        let comp = self.comp.borrow();
+        let Some(c) = comp.as_ref() else { return };
+        let run = || -> Result<()> {
+            let fade = self.gfx.compositor.CreateScalarKeyFrameAnimation()?;
+            fade.InsertKeyFrame(0.0, 1.0)?;
+            fade.InsertKeyFrame(1.0, 0.0)?;
+            fade.SetDuration(TimeSpan { Duration: ms * 10_000 })?;
+            c.root.StartAnimation(&HSTRING::from("Opacity"), &fade)
+        };
+        _ = run();
     }
 
     /// Hides and frees the drawing surface (a full-screen one is many MB).

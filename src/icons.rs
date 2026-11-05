@@ -148,11 +148,21 @@ pub struct Loader {
 impl Loader {
     /// Starts the worker; each finished icon is posted to `hwnd` as `msg` with a boxed `Icon` in lparam.
     pub fn start(hwnd: HWND, msg: u32) -> Loader {
+        Self::pool(hwnd, msg, 1)
+    }
+
+    /// `threads` workers sharing one queue (Launchpad loads a page at once).
+    pub fn pool(hwnd: HWND, msg: u32, threads: usize) -> Loader {
         let (tx, rx) = channel::<(String, u32)>();
+        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
         let target = hwnd.0 as isize;
-        std::thread::spawn(move || {
+        for _ in 0..threads.max(1) {
+            let rx = rx.clone();
+            std::thread::spawn(move || {
             unsafe { _ = CoInitializeEx(None, COINIT_MULTITHREADED) };
-            for (source, size) in rx {
+            loop {
+                let job = rx.lock().ok().and_then(|r| r.recv().ok());
+                let Some((source, size)) = job else { break };
                 let icon = Box::into_raw(Box::new(load(&source, size)));
                 let posted = unsafe {
                     PostMessageW(
@@ -166,7 +176,8 @@ impl Loader {
                     drop(unsafe { Box::from_raw(icon) }); // window is gone
                 }
             }
-        });
+            });
+        }
         Loader { tx }
     }
 

@@ -259,6 +259,7 @@ fn launchpad_png(path: &str, dwrite: &windows::Win32::Graphics::DirectWrite::IDW
         selected: &selected,
         show_hidden: false,
         hidden_count: 4,
+        chrome_only: false,
     };
     render_png(path, w, h, |dc| unsafe {
         let wall = dc.CreateSolidColorBrush(&Rgba(52, 60, 78, 255).d2d(), None)?;

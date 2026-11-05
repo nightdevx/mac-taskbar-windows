@@ -320,3 +320,25 @@ impl Label {
         };
     }
 }
+
+impl Gfx {
+    /// Premultiplied BGRA icon pixels in a surface brush.
+    pub fn icon_brush(&self, icon: &crate::icons::Icon) -> Result<windows::UI::Composition::CompositionSurfaceBrush> {
+        use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT};
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        let surface = self.surface(icon.size, icon.size)?;
+        self.draw(&surface, 1.0, |dc| unsafe {
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                ..Default::default()
+            };
+            let bmp = dc.CreateBitmap(D2D_SIZE_U { width: icon.size, height: icon.size }, Some(icon.pixels.as_ptr() as *const _), icon.size * 4, &props)?;
+            let side = icon.size as f32;
+            dc.DrawBitmap(&bmp, Some(&D2D_RECT_F { left: 0.0, top: 0.0, right: side, bottom: side }), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            Ok(())
+        })?;
+        self.compositor.CreateSurfaceBrushWithSurface(&surface)
+    }
+}

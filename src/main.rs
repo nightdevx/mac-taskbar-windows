@@ -23,6 +23,7 @@ mod snapshot;
 mod stack;
 mod status;
 mod theme;
+mod touchpad;
 mod wifi;
 mod window;
 mod winlist;

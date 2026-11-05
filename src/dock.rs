@@ -13,11 +13,7 @@ use windows::UI::Composition::{
     Compositor, ContainerVisual, ImplicitAnimationCollection, SpriteVisual,
 };
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
-};
 use windows::Win32::Graphics::Direct2D::*;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
@@ -988,43 +984,7 @@ impl Dock {
     }
 
     fn icon_brush(&self, icon: &icons::Icon) -> Result<CompositionSurfaceBrush> {
-        let surface = self.gfx.surface(icon.size, icon.size)?;
-        self.gfx.draw(&surface, 1.0, |dc| unsafe {
-            let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                ..Default::default()
-            };
-            let bmp = dc.CreateBitmap(
-                D2D_SIZE_U {
-                    width: icon.size,
-                    height: icon.size,
-                },
-                Some(icon.pixels.as_ptr() as *const _),
-                icon.size * 4,
-                &props,
-            )?;
-            let side = icon.size as f32;
-            dc.DrawBitmap(
-                &bmp,
-                Some(&D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: side,
-                    bottom: side,
-                }),
-                1.0,
-                D2D1_INTERPOLATION_MODE_LINEAR,
-                None,
-                None,
-            );
-            Ok(())
-        })?;
-        self.gfx.compositor.CreateSurfaceBrushWithSurface(&surface)
+        self.gfx.icon_brush(icon)
     }
 
     fn tracks(&self, hwnd: HWND) -> bool {
