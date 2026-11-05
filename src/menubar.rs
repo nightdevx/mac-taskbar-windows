@@ -1,0 +1,446 @@
+//! Top menu bar: system symbol, active app name, status icons, clock.
+
+use std::cell::{Cell, OnceCell, RefCell};
+use std::rc::Rc;
+
+use windows::UI::Composition::Desktop::DesktopWindowTarget;
+use windows::UI::Composition::{CompositionColorBrush, CompositionDrawingSurface, SpriteVisual};
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
+use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Direct2D::*;
+use windows::Win32::Graphics::DirectWrite::*;
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Shell::ABN_POSCHANGED;
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{PCWSTR, Result, w};
+use windows_numerics::Vector2;
+
+use crate::gfx::{self, Gfx, Label};
+use crate::theme::{self, Palette};
+use crate::status::{self, Icon, Sources};
+use crate::{appbar, appid, clock, log};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+
+pub const CLASS: PCWSTR = w!("TaskbarMenuBar");
+const WM_APPBAR: u32 = WM_APP + 1;
+const WM_FOREGROUND: u32 = WM_APP + 2;
+const TIMER_CLOCK: usize = 1;
+
+thread_local! {
+    /// Target for hook callbacks, which get no user data.
+    static BAR_HWND: Cell<HWND> = Cell::new(HWND::default());
+}
+
+pub struct Fonts {
+    pub text: IDWriteTextFormat,
+    pub bold: IDWriteTextFormat,
+    pub icons: IDWriteTextFormat,
+    pub icons_small: IDWriteTextFormat,
+    pub icons_large: IDWriteTextFormat,
+    /// Cap height of the text font, for optical vertical centring.
+    pub cap: f32,
+}
+
+impl Fonts {
+    pub fn new(dwrite: &IDWriteFactory) -> Result<Self> {
+        Ok(Self {
+            text: gfx::text_format(dwrite, theme::TEXT_FONT, theme::TEXT_SIZE, DWRITE_FONT_WEIGHT_REGULAR)?,
+            bold: gfx::text_format(dwrite, theme::TEXT_FONT, theme::TEXT_SIZE, DWRITE_FONT_WEIGHT_BOLD)?,
+            icons: gfx::text_format(dwrite, theme::ICON_FONT, theme::ICON_SIZE, DWRITE_FONT_WEIGHT_REGULAR)?,
+            icons_small: gfx::text_format(dwrite, theme::ICON_FONT, theme::ICON_SIZE_SMALL, DWRITE_FONT_WEIGHT_REGULAR)?,
+            icons_large: gfx::text_format(dwrite, theme::ICON_FONT, theme::ICON_SIZE_LARGE, DWRITE_FONT_WEIGHT_REGULAR)?,
+            cap: gfx::cap_height(dwrite, theme::TEXT_FONT, theme::TEXT_SIZE)?,
+        })
+    }
+}
+
+pub struct State {
+    pub app_name: String,
+    pub clock: String,
+    /// Status icons, drawn right to left before the clock.
+    pub status: Vec<Icon>,
+    pub palette: Palette,
+}
+
+/// Windows logo as the system symbol (macOS puts its logo here): four squares
+/// snapped to device pixels so the gaps stay crisp at every scale. Returns its width.
+fn draw_logo(dc: &ID2D1DeviceContext, x: f32, h: f32, brush: &ID2D1SolidColorBrush) -> f32 {
+    let snap = gfx::pixel_snapper(dc);
+    let one_px = snap(1.0).max(snap(0.75)); // at least one device pixel
+    let (side, gap) = (snap(theme::LOGO_SQUARE), snap(theme::LOGO_GAP).max(one_px));
+    let size = 2.0 * side + gap;
+    let (x0, y0) = (snap(x), snap((h - size) / 2.0));
+    unsafe {
+        dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        for (cx, cy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            let (l, t) = (x0 + cx * (side + gap), y0 + cy * (side + gap));
+            dc.FillRectangle(&D2D_RECT_F { left: l, top: t, right: l + side, bottom: t + side }, brush);
+        }
+        dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    }
+    size
+}
+
+/// Draws bar content (not the background) in DIPs on a transparent target.
+/// Right side first: clock and status icons keep their place, the app name gets the rest.
+pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, st: &State, w: f32, h: f32) -> Result<()> {
+    let brush = unsafe { dc.CreateSolidColorBrush(&st.palette.text.d2d(), None)? };
+    let faint = unsafe { dc.CreateSolidColorBrush(&st.palette.faint.d2d(), None)? };
+    let alert = unsafe { dc.CreateSolidColorBrush(&st.palette.alert.d2d(), None)? };
+    let pad = theme::MENUBAR_PAD_X;
+
+    let left = pad + draw_logo(dc, pad, h, &brush) + theme::LOGO_TO_NAME;
+    let name_floor = left + theme::NAME_MIN_WIDTH;
+
+    // Items are placed right to left; `edge` is the left ink edge of the last one,
+    // so every gap is measured ink to ink whatever the glyph's side bearings.
+    let clock = Label::new(dwrite, &st.clock, &fonts.text)?;
+    let clock_x = w - pad - clock.width;
+    clock.draw_text(dc, clock_x, h, fonts.cap, &brush);
+    let mut edge = clock_x + clock.ink_left;
+    let mut gap = theme::CLOCK_GAP;
+
+    for icon in &st.status {
+        let font = match icon.size {
+            status::IconSize::Small => &fonts.icons_small,
+            status::IconSize::Normal => &fonts.icons,
+            status::IconSize::Large => &fonts.icons_large,
+        };
+        let glyph = Label::new(dwrite, &icon.glyph.to_string(), font)?;
+        let gx = edge - gap - glyph.width + glyph.ink_right;
+        let text = icon.percent.map(|p| Label::new(dwrite, &clock::percent(p), &fonts.text)).transpose()?;
+        let tx = text.as_ref().map(|t| gx + glyph.ink_left - theme::PERCENT_GAP - t.width + t.ink_right);
+        let new_edge = match (&text, tx) {
+            (Some(t), Some(tx)) => tx + t.ink_left,
+            _ => gx + glyph.ink_left,
+        };
+        if new_edge - theme::MENUBAR_GAP < name_floor {
+            break; // ponytail: icons that do not fit are dropped; overflow menu when the tray lands (F5.1)
+        }
+        if let (Some(t), Some(tx)) = (&text, tx) {
+            t.draw_text(dc, tx, h, fonts.cap, &brush);
+        }
+        if let Some(under) = icon.under {
+            Label::new(dwrite, &under.to_string(), font)?.draw(dc, gx, h, &faint);
+        }
+        glyph.draw(dc, gx, h, if icon.alert { &alert } else { &brush });
+        edge = new_edge;
+        gap = theme::MENUBAR_GAP;
+    }
+
+    if !st.app_name.is_empty() {
+        let max = edge - theme::MENUBAR_GAP - left;
+        Label::fitted(dwrite, &st.app_name, &fonts.bold, max)?.draw_text(dc, left, h, fonts.cap, &brush);
+    }
+    Ok(())
+}
+
+struct Comp {
+    _target: DesktopWindowTarget,
+    /// Blurred desktop behind the bar; hidden when transparency effects are off.
+    backdrop: SpriteVisual,
+    tint: CompositionColorBrush,
+    content: SpriteVisual,
+    surface: CompositionDrawingSurface,
+}
+
+pub struct MenuBar {
+    hwnd: Cell<HWND>,
+    gfx: Rc<Gfx>,
+    fonts: Fonts,
+    /// `--hidden`: no window shown, no screen edge reserved (resource measurements).
+    hidden: bool,
+    dpi: Cell<u32>,
+    size: Cell<(i32, i32)>,
+    state: RefCell<State>,
+    comp: RefCell<Option<Comp>>,
+    sources: OnceCell<Sources>,
+    status: Cell<status::Status>,
+    /// Guards `place()`: the AppBar calls dispatch sent messages and can re-enter.
+    placing: Cell<bool>,
+    taskbar_created: u32,
+}
+
+impl MenuBar {
+    pub fn create(gfx: Rc<Gfx>, hidden: bool) -> Result<&'static MenuBar> {
+        let instance = unsafe { GetModuleHandleW(None)? };
+        let wc = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(wndproc),
+            hInstance: instance.into(),
+            hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
+            lpszClassName: CLASS,
+            ..Default::default()
+        };
+        unsafe { RegisterClassExW(&wc) };
+
+        let palette = theme::system_palette();
+        let bar: &'static MenuBar = Box::leak(Box::new(MenuBar {
+            hwnd: Cell::new(HWND::default()),
+            fonts: Fonts::new(&gfx.dwrite)?,
+            gfx,
+            hidden,
+            dpi: Cell::new(0),
+            size: Cell::new((0, 0)),
+            state: RefCell::new(State { app_name: String::new(), clock: String::new(), status: Vec::new(), palette }),
+            comp: RefCell::new(None),
+            sources: OnceCell::new(),
+            status: Cell::new(status::Status::default()),
+            placing: Cell::new(false),
+            taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+        }));
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+                CLASS,
+                w!("Menu bar"),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(instance.into()),
+                Some(bar as *const MenuBar as *const _),
+            )?
+        };
+        bar.hwnd.set(hwnd);
+        BAR_HWND.set(hwnd);
+        bar.init_visuals()?;
+        if !hidden {
+            appbar::register(hwnd, WM_APPBAR);
+        }
+        bar.place();
+        unsafe {
+            SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        }
+        bar.set_app(unsafe { GetForegroundWindow() });
+        let sources = Sources::start(hwnd);
+        let st = sources.read();
+        log::info(&format!("status at start: {st:?}"));
+        _ = bar.sources.set(sources);
+        bar.set_status(st);
+        bar.refresh_clock();
+        if !hidden {
+            unsafe { _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+        }
+        Ok(bar)
+    }
+
+    fn init_visuals(&self) -> Result<()> {
+        let c = &self.gfx.compositor;
+        let target = self.gfx.target(self.hwnd.get())?;
+        let root = c.CreateContainerVisual()?;
+        root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
+
+        let full = Vector2 { X: 1.0, Y: 1.0 };
+        unsafe {
+            let on = windows::core::BOOL(1);
+            DwmSetWindowAttribute(self.hwnd.get(), DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as *const _, 4)?;
+        }
+        let backdrop = c.CreateSpriteVisual()?;
+        backdrop.SetRelativeSizeAdjustment(full)?;
+        backdrop.SetBrush(&c.CreateHostBackdropBrush()?)?;
+
+        let tint = c.CreateColorBrush()?;
+        let tint_visual = c.CreateSpriteVisual()?;
+        tint_visual.SetRelativeSizeAdjustment(full)?;
+        tint_visual.SetBrush(&tint)?;
+
+        let surface = self.gfx.surface(1, 1)?;
+        let content = c.CreateSpriteVisual()?;
+        content.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
+
+        root.Children()?.InsertAtTop(&backdrop)?;
+        root.Children()?.InsertAtTop(&tint_visual)?;
+        root.Children()?.InsertAtTop(&content)?;
+        target.SetRoot(&root)?;
+        *self.comp.borrow_mut() = Some(Comp { _target: target, backdrop, tint, content, surface });
+        self.apply_background();
+        Ok(())
+    }
+
+    /// Tint over blur, or the same colour opaque when transparency effects are off.
+    fn apply_background(&self) {
+        let Some(c) = self.comp.borrow().as_ref().map(|c| (c.backdrop.clone(), c.tint.clone())) else { return };
+        let blur = theme::transparency();
+        let bar = self.state.borrow().palette.bar;
+        _ = c.0.SetIsVisible(blur);
+        _ = c.1.SetColor(if blur { bar } else { bar.opaque() }.ui());
+    }
+
+    /// Sizes and positions the bar on the primary monitor; redraws if the size or DPI changed.
+    fn place(&self) {
+        if self.placing.replace(true) {
+            return;
+        }
+        let hwnd = self.hwnd.get();
+        unsafe {
+            let monitor = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
+            let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            let (mut dpi, mut dpi_y) = (96, 96);
+            _ = GetMonitorInfoW(monitor, &mut mi);
+            _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
+
+            let h = theme::px(theme::MENUBAR_HEIGHT, dpi);
+            let rc = if self.hidden { appbar::top_rect(mi.rcMonitor, h) } else { appbar::set_top(hwnd, mi.rcMonitor, h) };
+            let size = (rc.right - rc.left, h);
+            _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), rc.left, rc.top, size.0, size.1, SWP_NOACTIVATE);
+
+            if dpi != self.dpi.get() || size != self.size.get() {
+                self.dpi.set(dpi);
+                self.size.set(size);
+                if let Err(e) = self.resize_surface(size) {
+                    log::error(&format!("menubar resize: {e}"));
+                }
+                self.redraw();
+            }
+        }
+        self.placing.set(false);
+    }
+
+    fn resize_surface(&self, (w, h): (i32, i32)) -> Result<()> {
+        if let Some(c) = self.comp.borrow().as_ref() {
+            self.gfx.resize(&c.surface, w as u32, h as u32)?;
+            c.content.SetSize(Vector2 { X: w as f32, Y: h as f32 })?;
+        }
+        Ok(())
+    }
+
+    fn redraw(&self) {
+        let comp = self.comp.borrow();
+        let Some(c) = comp.as_ref() else { return };
+        let st = self.state.borrow();
+        let scale = theme::scale(self.dpi.get());
+        let (w, h) = self.size.get();
+        let (wd, hd) = (w as f32 / scale, h as f32 / scale);
+        if let Err(e) = self.gfx.draw(&c.surface, scale, |dc| draw(dc, &self.gfx.dwrite, &self.fonts, &st, wd, hd)) {
+            log::error(&format!("menubar draw: {e}"));
+        }
+    }
+
+    fn refresh_clock(&self) {
+        let now = clock::now();
+        self.state.borrow_mut().clock = clock::text(&now);
+        self.redraw();
+        // +20 ms so a timer firing a tick early still lands in the new minute.
+        let delay = clock::ms_to_next_minute(now.wSecond, now.wMilliseconds) + 20;
+        unsafe { SetTimer(Some(self.hwnd.get()), TIMER_CLOCK, delay, None) };
+    }
+
+    /// Shows the app owning `fg`, unless it is a shell surface (Start, search).
+    fn set_app(&self, fg: HWND) {
+        let Some(name) = appid::display_name(fg) else { return };
+        if self.state.borrow().app_name == name {
+            return;
+        }
+        self.state.borrow_mut().app_name = name;
+        self.redraw();
+    }
+
+    /// Re-reads only the source that changed (a volume drag fires dozens of events).
+    fn refresh_status(&self, what: usize) {
+        let Some(sources) = self.sources.get() else { return };
+        let mut st = self.status.get();
+        match what {
+            status::VOLUME => st.volume = sources.read_volume(),
+            status::NETWORK => st.net = status::read_net(),
+            status::AUDIO_DEVICE => {
+                sources.bind_audio();
+                st.volume = sources.read_volume();
+            }
+            _ => st.battery = status::read_battery(),
+        }
+        self.set_status(st);
+    }
+
+    /// Redraws only when an icon actually changes.
+    fn set_status(&self, st: status::Status) {
+        self.status.set(st);
+        let icons = status::icons(&st);
+        if self.state.borrow().status == icons {
+            return;
+        }
+        self.state.borrow_mut().status = icons;
+        self.redraw();
+    }
+
+    /// Theme or transparency setting changed (both arrive as "ImmersiveColorSet").
+    fn refresh_palette(&self) {
+        let palette = theme::system_palette();
+        let changed = self.state.borrow().palette != palette;
+        self.state.borrow_mut().palette = palette;
+        self.apply_background();
+        if changed {
+            self.redraw();
+        }
+    }
+
+    fn handle(&self, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+        match msg {
+            WM_TIMER if wp.0 == TIMER_CLOCK => self.refresh_clock(),
+            WM_TIMECHANGE => self.refresh_clock(),
+            WM_FOREGROUND => self.set_app(HWND(wp.0 as *mut _)),
+            status::WM_STATUS => self.refresh_status(wp.0),
+            WM_POWERBROADCAST => {
+                self.refresh_status(usize::MAX); // battery
+                return Some(LRESULT(1));
+            }
+            WM_APPBAR if wp.0 as u32 == ABN_POSCHANGED => self.place(),
+            WM_DPICHANGED | WM_DISPLAYCHANGE => self.place(),
+            WM_SETTINGCHANGE => {
+                let what = if lp.0 == 0 { String::new() } else { unsafe { PCWSTR(lp.0 as *const u16).to_string().unwrap_or_default() } };
+                match what.as_str() {
+                    "ImmersiveColorSet" => self.refresh_palette(),
+                    "intl" => self.refresh_clock(),
+                    _ => return None,
+                }
+            }
+            WM_MOUSEACTIVATE => return Some(LRESULT(MA_NOACTIVATE as isize)),
+            WM_CLOSE => unsafe { _ = DestroyWindow(self.hwnd.get()) },
+            WM_DESTROY => {
+                if !self.hidden {
+                    appbar::remove(self.hwnd.get());
+                }
+                unsafe { PostQuitMessage(0) };
+            }
+            m if m == self.taskbar_created && !self.hidden => {
+                // Explorer restarted and forgot every AppBar.
+                appbar::register(self.hwnd.get(), WM_APPBAR);
+                self.size.set((0, 0));
+                self.place();
+            }
+            _ => return None,
+        }
+        Some(LRESULT(0))
+    }
+}
+
+/// Out-of-context hook: runs on our thread from the message loop. Posts, so the
+/// name lookup happens in normal dispatch and never re-enters a handler.
+unsafe extern "system" fn on_foreground(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, _: i32, _: u32, _: u32) {
+    if id_object == OBJID_WINDOW.0 && !hwnd.is_invalid() {
+        unsafe { _ = PostMessageW(Some(BAR_HWND.get()), WM_FOREGROUND, WPARAM(hwnd.0 as usize), LPARAM(0)) };
+    }
+}
+
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if msg == WM_NCCREATE {
+            let cs = &*(lp.0 as *const CREATESTRUCTW);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
+        }
+        let bar = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const MenuBar;
+        if let Some(bar) = bar.as_ref()
+            && let Some(r) = bar.handle(msg, wp, lp)
+        {
+            return r;
+        }
+        DefWindowProcW(hwnd, msg, wp, lp)
+    }
+}
