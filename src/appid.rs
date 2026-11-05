@@ -1,5 +1,7 @@
 //! Who owns a window: exe path, package AppUserModelID and a human display name.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HWND};
@@ -38,16 +40,30 @@ pub fn process_identity(hwnd: HWND) -> Option<(String, Option<String>)> {
     Some((exe?, package))
 }
 
-/// Start menu name for an AUMID ("Not Defteri", "Google Chrome").
+thread_local! {
+    static AUMID_NAMES: RefCell<HashMap<String, Option<String>>> = RefCell::new(HashMap::new());
+}
+
+/// Start menu name for an AUMID ("WhatsApp", "Hesap Makinesi"), cached per AUMID.
+/// Measured: the first lookup loads the shell Apps folder (139 ms, +178 handles),
+/// later lookups cost 43 ms each, so they are cached.
+// ponytail: first lookup still runs on the UI thread; move to the icon worker (F2.3) if it shows.
 pub fn aumid_name(aumid: &str) -> Option<String> {
     if aumid.is_empty() {
         return None; // would name the Apps folder itself
     }
-    unsafe {
-        let path = HSTRING::from(format!(r"shell:AppsFolder\{aumid}"));
-        let item: IShellItem = SHCreateItemFromParsingName(&path, None).ok()?;
-        take_pwstr(item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?)
+    if let Some(hit) = AUMID_NAMES.with_borrow(|m| m.get(aumid).cloned()) {
+        return hit;
     }
+    let name = unsafe {
+        let path = HSTRING::from(format!(r"shell:AppsFolder\{aumid}"));
+        SHCreateItemFromParsingName::<_, _, IShellItem>(&path, None)
+            .and_then(|item| item.GetDisplayName(SIGDN_NORMALDISPLAY))
+            .ok()
+            .and_then(take_pwstr)
+    };
+    AUMID_NAMES.with_borrow_mut(|m| m.insert(aumid.to_string(), name.clone()));
+    name
 }
 
 /// `FileDescription` from the exe's version resource.
