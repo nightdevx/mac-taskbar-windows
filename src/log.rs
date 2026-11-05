@@ -21,7 +21,11 @@ fn write(level: &str, msg: &str) {
     let too_big = std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES);
     let mut opts = OpenOptions::new();
     opts.create(true);
-    if too_big { opts.write(true).truncate(true) } else { opts.append(true) };
+    if too_big {
+        opts.write(true).truncate(true)
+    } else {
+        opts.append(true)
+    };
     if let Ok(mut f) = opts.open(&path) {
         let t = unsafe { GetLocalTime() };
         let _ = writeln!(
@@ -40,9 +44,10 @@ pub fn error(msg: &str) {
     write("error", msg);
 }
 
-/// Logs panics. Release builds abort after the hook, so this is the last word.
+/// Logs panics and gives the Windows taskbar back. Release builds abort after the hook.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         write("panic", &info.to_string());
+        crate::shelltray::restore();
     }));
 }

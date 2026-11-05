@@ -2,7 +2,8 @@
 
 use windows::Win32::Foundation::SYSTEMTIME;
 use windows::Win32::Globalization::{
-    ENUM_DATE_FORMATS_FLAGS, GetDateFormatEx, GetLocaleInfoEx, GetTimeFormatEx, LOCALE_IPOSITIVEPERCENT, LOCALE_RETURN_NUMBER, TIME_NOSECONDS,
+    ENUM_DATE_FORMATS_FLAGS, GetDateFormatEx, GetLocaleInfoEx, GetTimeFormatEx,
+    LOCALE_IPOSITIVEPERCENT, LOCALE_RETURN_NUMBER, TIME_NOSECONDS,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::core::{PCWSTR, w};
@@ -12,8 +13,21 @@ pub fn text(now: &SYSTEMTIME) -> String {
     let mut date = [0u16; 64];
     let mut time = [0u16; 32];
     unsafe {
-        let d = GetDateFormatEx(PCWSTR::null(), ENUM_DATE_FORMATS_FLAGS(0), Some(now), w!("ddd d MMM"), Some(&mut date), PCWSTR::null());
-        let t = GetTimeFormatEx(PCWSTR::null(), TIME_NOSECONDS, Some(now), PCWSTR::null(), Some(&mut time));
+        let d = GetDateFormatEx(
+            PCWSTR::null(),
+            ENUM_DATE_FORMATS_FLAGS(0),
+            Some(now),
+            w!("ddd d MMM"),
+            Some(&mut date),
+            PCWSTR::null(),
+        );
+        let t = GetTimeFormatEx(
+            PCWSTR::null(),
+            TIME_NOSECONDS,
+            Some(now),
+            PCWSTR::null(),
+            Some(&mut time),
+        );
         let part = |buf: &[u16], n: i32| String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize]);
         format!("{} {}", part(&date, d), part(&time, t))
     }
@@ -22,8 +36,18 @@ pub fn text(now: &SYSTEMTIME) -> String {
 /// Percentage in the user's locale: "%72" in Turkish, "72%" in English.
 pub fn percent(n: u8) -> String {
     let mut buf = [0u16; 2]; // LOCALE_RETURN_NUMBER writes one u32
-    let ok = unsafe { GetLocaleInfoEx(PCWSTR::null(), LOCALE_IPOSITIVEPERCENT | LOCALE_RETURN_NUMBER, Some(&mut buf)) } > 0;
-    let pattern = if ok { buf[0] as u32 | (buf[1] as u32) << 16 } else { 1 };
+    let ok = unsafe {
+        GetLocaleInfoEx(
+            PCWSTR::null(),
+            LOCALE_IPOSITIVEPERCENT | LOCALE_RETURN_NUMBER,
+            Some(&mut buf),
+        )
+    } > 0;
+    let pattern = if ok {
+        buf[0] as u32 | (buf[1] as u32) << 16
+    } else {
+        1
+    };
     format_percent(n, pattern)
 }
 
@@ -76,7 +100,15 @@ mod tests {
 
     #[test]
     fn text_has_date_and_time() {
-        let st = SYSTEMTIME { wYear: 2026, wMonth: 11, wDay: 5, wDayOfWeek: 4, wHour: 14, wMinute: 32, ..Default::default() };
+        let st = SYSTEMTIME {
+            wYear: 2026,
+            wMonth: 11,
+            wDay: 5,
+            wDayOfWeek: 4,
+            wHour: 14,
+            wMinute: 32,
+            ..Default::default()
+        };
         let s = text(&st);
         assert!(s.contains('5'), "{s}");
         assert!(s.contains("32"), "{s}");
