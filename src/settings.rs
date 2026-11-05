@@ -27,6 +27,8 @@ pub struct Settings {
     /// Apps hidden from Launchpad (Apps folder IDs).
     pub hidden_apps: Vec<String>,
     pub battery_percent: bool,
+    /// Start at sign-in (HKCU Run entry).
+    pub autostart: bool,
 }
 
 impl Default for Settings {
@@ -40,6 +42,7 @@ impl Default for Settings {
             folders: None,
             hidden_apps: Vec::new(),
             battery_percent: true,
+            autostart: false,
         }
     }
 }
@@ -78,6 +81,7 @@ pub fn parse(text: &str) -> Settings {
             }
             "dock_indicators" => s.dock_indicators = flag(value, s.dock_indicators),
             "battery_percent" => s.battery_percent = flag(value, s.battery_percent),
+            "autostart" => s.autostart = flag(value, s.autostart),
             "pins" if value.is_empty() => s.pins = Some(Vec::new()),
             "pin" => s.pins.get_or_insert_with(Vec::new).push(value.to_string()),
             "folders" if value.is_empty() => s.folders = Some(Vec::new()),
@@ -91,8 +95,8 @@ pub fn parse(text: &str) -> Settings {
 
 pub fn format(s: &Settings) -> String {
     let mut out = format!(
-        "dock_icon = {}\ndock_autohide = {}\ndock_indicators = {}\ndock_magnify = {}\nbattery_percent = {}\n",
-        s.dock_icon, s.dock_autohide, s.dock_indicators, s.dock_magnify, s.battery_percent
+        "dock_icon = {}\ndock_autohide = {}\ndock_indicators = {}\ndock_magnify = {}\nbattery_percent = {}\nautostart = {}\n",
+        s.dock_icon, s.dock_autohide, s.dock_indicators, s.dock_magnify, s.battery_percent, s.autostart
     );
     match &s.pins {
         Some(pins) if pins.is_empty() => out.push_str("pins =\n"),
@@ -108,6 +112,26 @@ pub fn format(s: &Settings) -> String {
     }
     s.hidden_apps.iter().for_each(|id| out.push_str(&format!("hide = {id}\n")));
     out
+}
+
+/// Adds or removes our HKCU Run entry (no admin rights needed).
+pub fn set_autostart(on: bool) {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW};
+    use windows::core::w;
+    let key = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
+    let name = w!("nightdijital taskbar");
+    let r = unsafe {
+        if on {
+            let Ok(exe) = std::env::current_exe() else { return };
+            let value: Vec<u16> = format!("\"{}\"", exe.display()).encode_utf16().chain([0]).collect();
+            RegSetKeyValueW(HKEY_CURRENT_USER, key, name, REG_SZ.0, Some(value.as_ptr() as *const _), (value.len() * 2) as u32)
+        } else {
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, key, name)
+        }
+    };
+    if r.is_err() && on {
+        crate::log::error(&format!("autostart: {r:?}"));
+    }
 }
 
 /// Pinned folders, Downloads until the user changes them.
@@ -180,6 +204,23 @@ pub fn update(change: impl FnOnce(&mut Settings)) {
 mod tests {
     use super::*;
 
+    /// Writes and removes the real HKCU Run entry: `cargo test autostart -- --ignored`.
+    #[test]
+    #[ignore]
+    fn autostart_entry() {
+        let read = || {
+            std::process::Command::new("reg")
+                .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "nightdijital taskbar"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default()
+        };
+        set_autostart(true);
+        assert!(read().contains(".exe"), "{}", read());
+        set_autostart(false);
+        assert!(!read().contains(".exe"));
+    }
+
     #[test]
     fn round_trip() {
         let s = Settings {
@@ -191,6 +232,7 @@ mod tests {
             folders: Some(vec![r"C:\Users\u\Downloads".into()]),
             hidden_apps: vec!["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into()],
             battery_percent: false,
+            autostart: true,
         };
         assert_eq!(parse(&format(&s)), s);
         let empty = Settings {

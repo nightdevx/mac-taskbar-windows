@@ -61,18 +61,20 @@ pub enum Control {
     /// Pin a folder right of the dock separator.
     AddFolder,
     BatteryPercent,
+    Autostart,
 }
 
 /// Keyboard focus order, also the order rows are laid out in.
-pub const CONTROLS: [Control; 6] = [
+pub const CONTROLS: [Control; 7] = [
     Control::Size,
     Control::Magnify,
     Control::AutoHide,
     Control::Indicators,
     Control::AddFolder,
     Control::BatteryPercent,
+    Control::Autostart,
 ];
-const GROUPS: [&str; 2] = ["Dock", "Menü çubuğu"];
+const GROUPS: [&str; 3] = ["Dock", "Menü çubuğu", "Genel"];
 
 impl Control {
     fn label(self) -> &'static str {
@@ -83,11 +85,13 @@ impl Control {
             Control::Indicators => "Açık uygulamalar için göstergeleri göster",
             Control::AddFolder => "Dock'taki klasörler",
             Control::BatteryPercent => "Pil yüzdesini göster",
+            Control::Autostart => "Oturum açılınca başlat",
         }
     }
     fn group(self) -> usize {
         match self {
             Control::BatteryPercent => 1,
+            Control::Autostart => 2,
             _ => 0,
         }
     }
@@ -123,6 +127,7 @@ impl Control {
             Control::AutoHide => s.dock_autohide,
             Control::Indicators => s.dock_indicators,
             Control::BatteryPercent => s.battery_percent,
+            Control::Autostart => s.autostart,
         }
     }
     fn toggle(self, s: &mut Settings) {
@@ -131,6 +136,7 @@ impl Control {
             Control::AutoHide => s.dock_autohide ^= true,
             Control::Indicators => s.dock_indicators ^= true,
             Control::BatteryPercent => s.battery_percent ^= true,
+            Control::Autostart => s.autostart ^= true,
         }
     }
 }

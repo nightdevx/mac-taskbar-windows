@@ -104,6 +104,9 @@ fn run(hidden: bool, open_settings: bool) -> Result<()> {
         unsafe { FindWindowW(dock::CLASS, None) }.unwrap_or_default(),
     )?;
     settings::listen(move |before, after| {
+        if before.autostart != after.autostart {
+            settings::set_autostart(after.autostart);
+        }
         dock.apply(before, after);
         bar.apply(before, after);
         prefs::refresh();
