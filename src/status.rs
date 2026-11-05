@@ -60,12 +60,28 @@ pub struct Status {
     pub net: Net,
 }
 
-/// One menu bar icon; `under` is drawn faintly beneath it (empty Wi-Fi arcs).
+/// One menu bar icon.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Icon {
     pub glyph: char,
+    /// Drawn faintly beneath the glyph (the empty Wi-Fi arcs).
     pub under: Option<char>,
+    /// Larger font size: battery glyphs sit small in their em box.
+    pub large: bool,
+    /// Percentage shown as text left of the glyph (battery, like macOS).
+    pub percent: Option<u8>,
+    /// Drawn in the alert colour (battery low and not charging).
+    pub alert: bool,
 }
+
+impl Icon {
+    fn plain(glyph: char) -> Self {
+        Icon { glyph, under: None, large: false, percent: None, alert: false }
+    }
+}
+
+/// Windows warns at 10 % by default ("low battery level").
+pub const LOW_BATTERY: u8 = 10;
 
 const WIFI_FULL: char = '\u{E701}';
 
@@ -105,16 +121,17 @@ pub fn wifi_glyph(bars: u8) -> char {
 pub fn icons(st: &Status) -> Vec<Icon> {
     let mut out = Vec::new();
     match st.net {
-        Net::Wifi(s) => out.push(Icon { glyph: wifi_glyph(s), under: Some(WIFI_FULL) }),
-        Net::Offline => out.push(Icon { glyph: '\u{EB5E}', under: None }),
-        Net::NoInternet => out.push(Icon { glyph: '\u{F384}', under: None }),
+        Net::Wifi(s) => out.push(Icon { under: Some(WIFI_FULL), ..Icon::plain(wifi_glyph(s)) }),
+        Net::Offline => out.push(Icon::plain('\u{EB5E}')),
+        Net::NoInternet => out.push(Icon::plain('\u{F384}')),
         Net::Wired | Net::Unknown => {}
     }
     if let Some(b) = st.battery {
-        out.push(Icon { glyph: battery_glyph(b.percent, b.plugged), under: None });
+        let alert = !b.plugged && b.percent <= LOW_BATTERY;
+        out.push(Icon { large: true, percent: Some(b.percent), alert, ..Icon::plain(battery_glyph(b.percent, b.plugged)) });
     }
     if let Some(v) = st.volume {
-        out.push(Icon { glyph: volume_glyph(v.level, v.muted), under: None });
+        out.push(Icon::plain(volume_glyph(v.level, v.muted)));
     }
     out
 }
@@ -309,6 +326,18 @@ mod tests {
     }
 
     #[test]
+    fn low_battery_alerts_only_when_not_charging() {
+        let at = |percent, plugged| {
+            let st = Status { battery: Some(Battery { percent, plugged }), ..Status::default() };
+            icons(&st)[0].alert
+        };
+        assert!(at(10, false));
+        assert!(at(3, false));
+        assert!(!at(11, false));
+        assert!(!at(5, true));
+    }
+
+    #[test]
     fn volume_steps() {
         assert_eq!(volume_glyph(0.8, true), '\u{E74F}');
         assert_eq!(volume_glyph(0.0, false), '\u{E992}');
@@ -334,8 +363,13 @@ mod tests {
             volume: Some(Volume { level: 0.5, muted: false }),
             net: Net::Wifi(5),
         };
-        let glyphs: Vec<char> = icons(&st).iter().map(|i| i.glyph).collect();
+        let all = icons(&st);
+        let glyphs: Vec<char> = all.iter().map(|i| i.glyph).collect();
         assert_eq!(glyphs, [WIFI_FULL, battery_glyph(50, false), volume_glyph(0.5, false)]);
+        assert_eq!(all[1].percent, Some(50));
+        assert!(all[1].large && !all[0].large);
+        assert_eq!(all[0].under, Some(WIFI_FULL));
+        assert!(!all[1].alert);
         let wired = Status { net: Net::Wired, ..st };
         assert_eq!(icons(&wired).len(), 2);
         assert!(icons(&Status::default()).is_empty());

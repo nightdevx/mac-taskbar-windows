@@ -165,12 +165,21 @@ pub struct Label {
 
 impl Label {
     pub fn new(dwrite: &IDWriteFactory, text: &str, fmt: &IDWriteTextFormat) -> Result<Self> {
+        Self::fitted(dwrite, text, fmt, f32::MAX)
+    }
+
+    /// Text cut with an ellipsis ("Visual Studio Co…") when wider than `max_w`.
+    pub fn fitted(dwrite: &IDWriteFactory, text: &str, fmt: &IDWriteTextFormat, max_w: f32) -> Result<Self> {
         let wide: Vec<u16> = text.encode_utf16().collect();
         unsafe {
-            let layout = dwrite.CreateTextLayout(&wide, fmt, f32::MAX, f32::MAX)?;
+            let layout = dwrite.CreateTextLayout(&wide, fmt, max_w.max(0.0), f32::MAX)?;
+            if max_w < f32::MAX {
+                let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, ..Default::default() };
+                layout.SetTrimming(&trimming, &dwrite.CreateEllipsisTrimmingSign(fmt)?)?;
+            }
             let mut m = DWRITE_TEXT_METRICS::default();
             layout.GetMetrics(&mut m)?;
-            Ok(Self { layout, width: m.widthIncludingTrailingWhitespace, height: m.height })
+            Ok(Self { layout, width: m.widthIncludingTrailingWhitespace.min(max_w), height: m.height })
         }
     }
 

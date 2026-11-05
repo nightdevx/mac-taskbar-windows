@@ -24,27 +24,36 @@ pub fn run(path: &str) -> Result<()> {
     let fonts = Fonts::new(&dwrite)?;
     let bar_h = theme::MENUBAR_HEIGHT;
     let gap = 12.0;
-    let rows = [theme::DARK, theme::LIGHT];
+    // Typical state in both themes, then edge states: long app name, low battery,
+    // muted, no internet, offline.
+    let normal = status::Status {
+        battery: Some(status::Battery { percent: 72, plugged: false }),
+        volume: Some(status::Volume { level: 0.6, muted: false }),
+        net: status::Net::Wifi(3),
+    };
+    let edge = status::Status {
+        battery: Some(status::Battery { percent: 7, plugged: false }),
+        volume: Some(status::Volume { level: 0.6, muted: true }),
+        net: status::Net::NoInternet,
+    };
+    let long = "Microsoft Visual Studio Code - Insiders Edition, a name long enough to be cut off before the icons. ".repeat(3);
+    let rows = [
+        (theme::DARK, "Gezgin", normal),
+        (theme::LIGHT, "Gezgin", normal),
+        (theme::DARK, long.as_str(), edge),
+        (theme::LIGHT, "Ayarlar", status::Status { battery: Some(status::Battery { percent: 100, plugged: true }), net: status::Net::Offline, ..edge }),
+    ];
     let height = rows.len() as f32 * (bar_h + gap) + gap;
 
     render_png(path, WIDTH, height, |dc| unsafe {
         let wall = dc.CreateSolidColorBrush(&WALLPAPER.d2d(), None)?;
         dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: WIDTH, bottom: height }, &wall);
-        for (i, palette) in rows.into_iter().enumerate() {
+        for (i, (palette, app, st)) in rows.into_iter().enumerate() {
             let y = gap + i as f32 * (bar_h + gap);
             dc.SetTransform(&Matrix3x2::translation(0.0, y));
             let fill = dc.CreateSolidColorBrush(&palette.bar.d2d(), None)?;
             dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: WIDTH, bottom: bar_h }, &fill);
-            let st = State {
-                app_name: "Gezgin".into(),
-                clock: clock::text(&clock::now()),
-                status: status::icons(&status::Status {
-                    battery: Some(status::Battery { percent: 72, plugged: false }),
-                    volume: Some(status::Volume { level: 0.6, muted: false }),
-                    net: status::Net::Wifi(3),
-                }),
-                palette,
-            };
+            let st = State { app_name: app.into(), clock: clock::text(&clock::now()), status: status::icons(&st), palette };
             menubar::draw(dc, &dwrite, &fonts, &st, WIDTH, bar_h)?;
         }
         Ok(())

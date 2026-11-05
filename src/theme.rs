@@ -6,11 +6,23 @@ use windows::core::w;
 
 pub const MENUBAR_HEIGHT: f32 = 28.0;
 pub const MENUBAR_PAD_X: f32 = 14.0;
+/// Between status icons.
 pub const MENUBAR_GAP: f32 = 16.0;
+/// Between the last status icon and the clock, so the clock reads as its own group.
+pub const CLOCK_GAP: f32 = 20.0;
+/// Between a battery percentage and its glyph.
+pub const PERCENT_GAP: f32 = 5.0;
+/// Windows logo: two rows of two squares.
+pub const LOGO_SQUARE: f32 = 6.0;
+pub const LOGO_GAP: f32 = 1.0;
+pub const LOGO_TO_NAME: f32 = 18.0;
+/// Status icons give way before the app name gets narrower than this.
+pub const NAME_MIN_WIDTH: f32 = 120.0;
 pub const TEXT_FONT: &str = "Segoe UI Variable Text";
 pub const TEXT_SIZE: f32 = 13.0;
 pub const ICON_FONT: &str = "Segoe Fluent Icons";
-pub const ICON_SIZE: f32 = 15.0;
+pub const ICON_SIZE: f32 = 16.0;
+pub const ICON_SIZE_LARGE: f32 = 20.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
@@ -30,10 +42,12 @@ pub struct Palette {
     /// Bar fill laid over the blurred backdrop.
     pub bar: Rgba,
     pub text: Rgba,
+    /// Low battery. Fluent "critical" colours for each theme.
+    pub alert: Rgba,
 }
 
-pub const DARK: Palette = Palette { bar: Rgba(28, 28, 30, 150), text: Rgba(255, 255, 255, 235) };
-pub const LIGHT: Palette = Palette { bar: Rgba(246, 246, 248, 165), text: Rgba(0, 0, 0, 220) };
+pub const DARK: Palette = Palette { bar: Rgba(28, 28, 30, 150), text: Rgba(255, 255, 255, 235), alert: Rgba(255, 153, 164, 255) };
+pub const LIGHT: Palette = Palette { bar: Rgba(246, 246, 248, 165), text: Rgba(0, 0, 0, 220), alert: Rgba(196, 43, 28, 255) };
 
 /// System surfaces (taskbar, Start) follow `SystemUsesLightTheme`, not the app setting.
 pub fn system_palette() -> Palette {
