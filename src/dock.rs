@@ -197,6 +197,14 @@ fn windows_pins() -> Vec<String> {
     links
 }
 
+/// Pins that are apps. Older builds also saved the Launchpad button, folders
+/// and Trash as pins, which then showed up twice.
+fn app_pins(pins: Vec<String>) -> Vec<String> {
+    pins.into_iter()
+        .filter(|p| p != "Launchpad" && !p.eq_ignore_ascii_case(TRASH) && !std::path::Path::new(p).is_dir())
+        .collect()
+}
+
 /// A dock entry before it has visuals: what `entries()` finds at start.
 pub struct Entry {
     pub identity: AppIdentity,
@@ -207,7 +215,7 @@ pub struct Entry {
 
 /// Pinned apps, then running apps that are not pinned, oldest window first.
 pub fn entries(settings: &Settings) -> Vec<Entry> {
-    let pins = settings.pins.clone().unwrap_or_else(windows_pins);
+    let pins = app_pins(settings.pins.clone().unwrap_or_else(windows_pins));
     let mut out: Vec<Entry> = pins
         .into_iter()
         .filter_map(|p| {
@@ -1525,6 +1533,7 @@ impl Dock {
             .items
             .borrow()
             .iter()
+            .filter(|i| i.kind == Kind::App) // Launchpad, folders and Trash are not pins
             .filter_map(|i| i.pin.clone())
             .collect();
         settings::update(|st| st.pins = Some(pins));
@@ -1720,6 +1729,19 @@ unsafe extern "system" fn on_cloak(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_apps_are_pins() {
+        let dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let pins = vec![
+            "Launchpad".to_string(),
+            r"C:\Brave.lnk".to_string(),
+            dir,
+            TRASH.to_string(),
+            r"shell:AppsFolder\X!App".to_string(),
+        ];
+        assert_eq!(app_pins(pins), [r"C:\Brave.lnk", r"shell:AppsFolder\X!App"]);
+    }
 
     #[test]
     fn side_docks_keep_the_edge_side() {
