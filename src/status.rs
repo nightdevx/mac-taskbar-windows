@@ -47,7 +47,8 @@ pub enum Net {
     #[default]
     Unknown,
     Offline,
-    NoInternet,
+    /// Connected without internet; `wifi` picks the Wi-Fi warning glyph over the globe.
+    NoInternet { wifi: bool },
     Wired,
     /// Signal bars 0..=5, as Windows reports them.
     Wifi(u8),
@@ -66,8 +67,7 @@ pub struct Icon {
     pub glyph: char,
     /// Drawn faintly beneath the glyph (the empty Wi-Fi arcs).
     pub under: Option<char>,
-    /// Larger font size: battery glyphs sit small in their em box.
-    pub large: bool,
+    pub size: IconSize,
     /// Percentage shown as text left of the glyph (battery, like macOS).
     pub percent: Option<u8>,
     /// Drawn in the alert colour (battery low and not charging).
@@ -76,8 +76,18 @@ pub struct Icon {
 
 impl Icon {
     fn plain(glyph: char) -> Self {
-        Icon { glyph, under: None, large: false, percent: None, alert: false }
+        Icon { glyph, under: None, size: IconSize::Normal, percent: None, alert: false }
     }
+}
+
+/// Segoe Fluent glyphs fill their em box unevenly; these sizes give them equal ink height.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum IconSize {
+    /// The globe fills the whole em box.
+    Small,
+    Normal,
+    /// Battery glyphs sit small inside theirs.
+    Large,
 }
 
 /// Windows warns at 10 % by default ("low battery level").
@@ -123,12 +133,13 @@ pub fn icons(st: &Status) -> Vec<Icon> {
     match st.net {
         Net::Wifi(s) => out.push(Icon { under: Some(WIFI_FULL), ..Icon::plain(wifi_glyph(s)) }),
         Net::Offline => out.push(Icon::plain('\u{EB5E}')),
-        Net::NoInternet => out.push(Icon::plain('\u{F384}')),
+        Net::NoInternet { wifi: true } => out.push(Icon::plain('\u{EB63}')),
+        Net::NoInternet { wifi: false } => out.push(Icon { size: IconSize::Small, ..Icon::plain('\u{F384}') }),
         Net::Wired | Net::Unknown => {}
     }
     if let Some(b) = st.battery {
         let alert = !b.plugged && b.percent <= LOW_BATTERY;
-        out.push(Icon { large: true, percent: Some(b.percent), alert, ..Icon::plain(battery_glyph(b.percent, b.plugged)) });
+        out.push(Icon { size: IconSize::Large, percent: Some(b.percent), alert, ..Icon::plain(battery_glyph(b.percent, b.plugged)) });
     }
     if let Some(v) = st.volume {
         out.push(Icon::plain(volume_glyph(v.level, v.muted)));
@@ -277,14 +288,14 @@ impl Sources {
 #[allow(non_upper_case_globals)] // windows-rs constant names
 pub fn read_net() -> Net {
     use windows::Networking::Connectivity::{NetworkConnectivityLevel, NetworkInformation};
-    if let Ok(p) = NetworkInformation::GetInternetConnectionProfile()
-        && p.GetNetworkConnectivityLevel().is_ok_and(|l| l == NetworkConnectivityLevel::InternetAccess)
-    {
-        return if p.IsWlanConnectionProfile().unwrap_or(false) {
-            Net::Wifi(p.GetSignalBars().and_then(|b| b.Value()).unwrap_or(0))
-        } else {
-            Net::Wired
-        };
+    if let Ok(p) = NetworkInformation::GetInternetConnectionProfile() {
+        let wifi = p.IsWlanConnectionProfile().unwrap_or(false);
+        match p.GetNetworkConnectivityLevel() {
+            Ok(NetworkConnectivityLevel::InternetAccess) if wifi => return Net::Wifi(p.GetSignalBars().and_then(|b| b.Value()).unwrap_or(0)),
+            Ok(NetworkConnectivityLevel::InternetAccess) => return Net::Wired,
+            Ok(NetworkConnectivityLevel::ConstrainedInternetAccess | NetworkConnectivityLevel::LocalAccess) => return Net::NoInternet { wifi },
+            _ => {}
+        }
     }
     let mut hint = NL_NETWORK_CONNECTIVITY_HINT::default();
     if unsafe { GetNetworkConnectivityHint(&mut hint) }.is_err() {
@@ -292,7 +303,8 @@ pub fn read_net() -> Net {
     }
     match hint.ConnectivityLevel {
         NetworkConnectivityLevelHintNone => Net::Offline,
-        NetworkConnectivityLevelHintLocalAccess | NetworkConnectivityLevelHintConstrainedInternetAccess => Net::NoInternet,
+        // ponytail: without a profile we cannot tell Wi-Fi from cable here, so the globe shows.
+        NetworkConnectivityLevelHintLocalAccess | NetworkConnectivityLevelHintConstrainedInternetAccess => Net::NoInternet { wifi: false },
         _ => Net::Unknown,
     }
 }
@@ -367,12 +379,16 @@ mod tests {
         let glyphs: Vec<char> = all.iter().map(|i| i.glyph).collect();
         assert_eq!(glyphs, [WIFI_FULL, battery_glyph(50, false), volume_glyph(0.5, false)]);
         assert_eq!(all[1].percent, Some(50));
-        assert!(all[1].large && !all[0].large);
+        assert_eq!((all[0].size, all[1].size), (IconSize::Normal, IconSize::Large));
         assert_eq!(all[0].under, Some(WIFI_FULL));
         assert!(!all[1].alert);
         let wired = Status { net: Net::Wired, ..st };
         assert_eq!(icons(&wired).len(), 2);
         assert!(icons(&Status::default()).is_empty());
+        let wifi_warn = icons(&Status { net: Net::NoInternet { wifi: true }, ..Status::default() })[0];
+        assert_eq!((wifi_warn.glyph, wifi_warn.size), ('\u{EB63}', IconSize::Normal));
+        let globe = icons(&Status { net: Net::NoInternet { wifi: false }, ..Status::default() })[0];
+        assert_eq!((globe.glyph, globe.size), ('\u{F384}', IconSize::Small));
     }
 
 }

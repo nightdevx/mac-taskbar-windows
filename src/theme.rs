@@ -23,6 +23,8 @@ pub const TEXT_SIZE: f32 = 13.0;
 pub const ICON_FONT: &str = "Segoe Fluent Icons";
 pub const ICON_SIZE: f32 = 16.0;
 pub const ICON_SIZE_LARGE: f32 = 20.0;
+/// Glyphs that fill their whole em box (the globe).
+pub const ICON_SIZE_SMALL: f32 = 13.5;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
@@ -46,12 +48,14 @@ pub struct Palette {
     /// Bar fill laid over the blurred backdrop.
     pub bar: Rgba,
     pub text: Rgba,
+    /// Empty Wi-Fi arcs under the signal glyph.
+    pub faint: Rgba,
     /// Low battery. Fluent "critical" colours for each theme.
     pub alert: Rgba,
 }
 
-pub const DARK: Palette = Palette { bar: Rgba(28, 28, 30, 150), text: Rgba(255, 255, 255, 235), alert: Rgba(255, 153, 164, 255) };
-pub const LIGHT: Palette = Palette { bar: Rgba(246, 246, 248, 165), text: Rgba(0, 0, 0, 220), alert: Rgba(196, 43, 28, 255) };
+pub const DARK: Palette = Palette { bar: Rgba(28, 28, 30, 150), text: Rgba(255, 255, 255, 235), faint: Rgba(255, 255, 255, 78), alert: Rgba(255, 153, 164, 255) };
+pub const LIGHT: Palette = Palette { bar: Rgba(246, 246, 248, 165), text: Rgba(0, 0, 0, 220), faint: Rgba(0, 0, 0, 73), alert: Rgba(196, 43, 28, 255) };
 
 fn personalize_flag(name: PCWSTR) -> Option<bool> {
     let mut value = 0u32;

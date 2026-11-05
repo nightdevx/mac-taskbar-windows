@@ -34,7 +34,7 @@ pub fn run(path: &str) -> Result<()> {
     let edge = status::Status {
         battery: Some(status::Battery { percent: 7, plugged: false }),
         volume: Some(status::Volume { level: 0.6, muted: true }),
-        net: status::Net::NoInternet,
+        net: status::Net::NoInternet { wifi: false },
     };
     let long = "Microsoft Visual Studio Code - Insiders Edition, a name long enough to be cut off before the icons. ".repeat(3);
     let rows = [
@@ -42,6 +42,7 @@ pub fn run(path: &str) -> Result<()> {
         (theme::LIGHT, "Gezgin", normal),
         (theme::DARK, long.as_str(), edge),
         (theme::LIGHT, "Ayarlar", status::Status { battery: Some(status::Battery { percent: 100, plugged: true }), net: status::Net::Offline, ..edge }),
+        (theme::LIGHT, "Not Defteri", status::Status { battery: Some(status::Battery { percent: 9, plugged: false }), net: status::Net::NoInternet { wifi: true }, ..normal }),
     ];
     let height = rows.len() as f32 * (bar_h + gap) + gap;
 

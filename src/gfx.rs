@@ -156,11 +156,44 @@ fn is_device_lost(e: &windows::core::Error) -> bool {
     [DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, windows::Win32::Foundation::D2DERR_RECREATE_TARGET].contains(&e.code())
 }
 
+/// Rounds DIP values to whole device pixels of `dc`, so edges stay crisp at 125 % and 150 %.
+pub fn pixel_snapper(dc: &ID2D1DeviceContext) -> impl Fn(f32) -> f32 {
+    let (mut dpi, mut _dpi_y) = (96.0, 96.0);
+    unsafe { dc.GetDpi(&mut dpi, &mut _dpi_y) };
+    let scale = dpi / 96.0;
+    move |dip: f32| (dip * scale).round() / scale
+}
+
+/// Cap height in DIPs of `family` at `size`, used to centre text optically.
+pub fn cap_height(dwrite: &IDWriteFactory, family: &str, size: f32) -> Result<f32> {
+    let name: Vec<u16> = family.encode_utf16().chain([0]).collect();
+    unsafe {
+        let mut fonts = None;
+        dwrite.GetSystemFontCollection(&mut fonts, false)?;
+        let fonts = fonts.expect("system font collection");
+        let (mut index, mut exists) = (0, windows::core::BOOL(0));
+        fonts.FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists)?;
+        if !exists.as_bool() {
+            return Ok(size * 0.7); // typical Latin cap height
+        }
+        let font = fonts.GetFontFamily(index)?.GetFirstMatchingFont(DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL)?;
+        let mut m = DWRITE_FONT_METRICS::default();
+        font.GetMetrics(&mut m);
+        Ok(m.capHeight as f32 * size / m.designUnitsPerEm as f32)
+    }
+}
+
 /// Text laid out once, measured, then drawn.
 pub struct Label {
     pub layout: IDWriteTextLayout,
+    /// Advance width of the layout box.
     pub width: f32,
     pub height: f32,
+    /// Distance from the box edges to the visible ink, so gaps can be measured ink to ink.
+    pub ink_left: f32,
+    pub ink_right: f32,
+    /// Baseline from the top of the box.
+    pub baseline: f32,
 }
 
 impl Label {
@@ -179,13 +212,30 @@ impl Label {
             }
             let mut m = DWRITE_TEXT_METRICS::default();
             layout.GetMetrics(&mut m)?;
-            Ok(Self { layout, width: m.widthIncludingTrailingWhitespace.min(max_w), height: m.height })
+            let width = m.widthIncludingTrailingWhitespace.min(max_w);
+            // Overhangs are measured against the max width, so shrink it to the text first.
+            layout.SetMaxWidth(width)?;
+            let ink = layout.GetOverhangMetrics()?;
+            let mut line = [DWRITE_LINE_METRICS::default()];
+            let mut lines = 0;
+            layout.GetLineMetrics(Some(&mut line), &mut lines)?;
+            Ok(Self { layout, width, height: m.height, ink_left: -ink.left, ink_right: -ink.right, baseline: line[0].baseline })
         }
     }
 
-    /// Draws with the left edge at `x`, vertically centred in a band `[0, band_h]`.
+    /// Text: puts the middle of the capitals on the middle of the band.
+    pub fn draw_text(&self, dc: &ID2D1DeviceContext, x: f32, band_h: f32, cap: f32, brush: &ID2D1SolidColorBrush) {
+        let snap = pixel_snapper(dc);
+        self.draw_at(dc, snap(x), snap((band_h + cap) / 2.0) - self.baseline, brush);
+    }
+
+    /// Icon glyphs: centres the line box, which matches their ink, in a band `[0, band_h]`.
     pub fn draw(&self, dc: &ID2D1DeviceContext, x: f32, band_h: f32, brush: &ID2D1SolidColorBrush) {
-        let y = ((band_h - self.height) / 2.0).round();
+        let snap = pixel_snapper(dc);
+        self.draw_at(dc, snap(x), snap((band_h - self.height) / 2.0), brush);
+    }
+
+    fn draw_at(&self, dc: &ID2D1DeviceContext, x: f32, y: f32, brush: &ID2D1SolidColorBrush) {
         unsafe {
             dc.DrawTextLayout(
                 windows_numerics::Vector2 { X: x, Y: y },

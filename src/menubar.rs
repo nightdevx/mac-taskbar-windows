@@ -38,8 +38,10 @@ pub struct Fonts {
     pub text: IDWriteTextFormat,
     pub bold: IDWriteTextFormat,
     pub icons: IDWriteTextFormat,
-    /// Battery glyphs are drawn small inside the font's em box; this size matches the other icons.
+    pub icons_small: IDWriteTextFormat,
     pub icons_large: IDWriteTextFormat,
+    /// Cap height of the text font, for optical vertical centring.
+    pub cap: f32,
 }
 
 impl Fonts {
@@ -48,7 +50,9 @@ impl Fonts {
             text: gfx::text_format(dwrite, theme::TEXT_FONT, theme::TEXT_SIZE, DWRITE_FONT_WEIGHT_REGULAR)?,
             bold: gfx::text_format(dwrite, theme::TEXT_FONT, theme::TEXT_SIZE, DWRITE_FONT_WEIGHT_BOLD)?,
             icons: gfx::text_format(dwrite, theme::ICON_FONT, theme::ICON_SIZE, DWRITE_FONT_WEIGHT_REGULAR)?,
+            icons_small: gfx::text_format(dwrite, theme::ICON_FONT, theme::ICON_SIZE_SMALL, DWRITE_FONT_WEIGHT_REGULAR)?,
             icons_large: gfx::text_format(dwrite, theme::ICON_FONT, theme::ICON_SIZE_LARGE, DWRITE_FONT_WEIGHT_REGULAR)?,
+            cap: gfx::cap_height(dwrite, theme::TEXT_FONT, theme::TEXT_SIZE)?,
         })
     }
 }
@@ -64,13 +68,11 @@ pub struct State {
 /// Windows logo as the system symbol (macOS puts its logo here): four squares
 /// snapped to device pixels so the gaps stay crisp at every scale. Returns its width.
 fn draw_logo(dc: &ID2D1DeviceContext, x: f32, h: f32, brush: &ID2D1SolidColorBrush) -> f32 {
-    let (mut dpi, mut _dpi_y) = (96.0, 96.0);
-    unsafe { dc.GetDpi(&mut dpi, &mut _dpi_y) };
-    let scale = dpi / 96.0;
-    let px = |dip: f32| (dip * scale).round().max(1.0) / scale;
-    let (side, gap) = (px(theme::LOGO_SQUARE), px(theme::LOGO_GAP));
+    let snap = gfx::pixel_snapper(dc);
+    let one_px = snap(1.0).max(snap(0.75)); // at least one device pixel
+    let (side, gap) = (snap(theme::LOGO_SQUARE), snap(theme::LOGO_GAP).max(one_px));
     let size = 2.0 * side + gap;
-    let (x0, y0) = (px(x), px((h - size) / 2.0));
+    let (x0, y0) = (snap(x), snap((h - size) / 2.0));
     unsafe {
         dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
         for (cx, cy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
@@ -86,40 +88,52 @@ fn draw_logo(dc: &ID2D1DeviceContext, x: f32, h: f32, brush: &ID2D1SolidColorBru
 /// Right side first: clock and status icons keep their place, the app name gets the rest.
 pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, st: &State, w: f32, h: f32) -> Result<()> {
     let brush = unsafe { dc.CreateSolidColorBrush(&st.palette.text.d2d(), None)? };
-    let faint = unsafe { dc.CreateSolidColorBrush(&theme::Rgba(st.palette.text.0, st.palette.text.1, st.palette.text.2, st.palette.text.3 / 3).d2d(), None)? };
+    let faint = unsafe { dc.CreateSolidColorBrush(&st.palette.faint.d2d(), None)? };
     let alert = unsafe { dc.CreateSolidColorBrush(&st.palette.alert.d2d(), None)? };
     let pad = theme::MENUBAR_PAD_X;
 
     let left = pad + draw_logo(dc, pad, h, &brush) + theme::LOGO_TO_NAME;
     let name_floor = left + theme::NAME_MIN_WIDTH;
 
+    // Items are placed right to left; `edge` is the left ink edge of the last one,
+    // so every gap is measured ink to ink whatever the glyph's side bearings.
     let clock = Label::new(dwrite, &st.clock, &fonts.text)?;
-    let mut right = w - pad - clock.width;
-    clock.draw(dc, right, h, &brush);
-    right -= theme::CLOCK_GAP - theme::MENUBAR_GAP;
+    let clock_x = w - pad - clock.width;
+    clock.draw_text(dc, clock_x, h, fonts.cap, &brush);
+    let mut edge = clock_x + clock.ink_left;
+    let mut gap = theme::CLOCK_GAP;
 
     for icon in &st.status {
-        let font = if icon.large { &fonts.icons_large } else { &fonts.icons };
+        let font = match icon.size {
+            status::IconSize::Small => &fonts.icons_small,
+            status::IconSize::Normal => &fonts.icons,
+            status::IconSize::Large => &fonts.icons_large,
+        };
         let glyph = Label::new(dwrite, &icon.glyph.to_string(), font)?;
+        let gx = edge - gap - glyph.width + glyph.ink_right;
         let text = icon.percent.map(|p| Label::new(dwrite, &clock::percent(p), &fonts.text)).transpose()?;
-        let width = glyph.width + text.as_ref().map_or(0.0, |t| t.width + theme::PERCENT_GAP);
-        if right - theme::MENUBAR_GAP - width < name_floor {
+        let tx = text.as_ref().map(|t| gx + glyph.ink_left - theme::PERCENT_GAP - t.width + t.ink_right);
+        let new_edge = match (&text, tx) {
+            (Some(t), Some(tx)) => tx + t.ink_left,
+            _ => gx + glyph.ink_left,
+        };
+        if new_edge - theme::MENUBAR_GAP < name_floor {
             break; // ponytail: icons that do not fit are dropped; overflow menu when the tray lands (F5.1)
         }
-        right -= theme::MENUBAR_GAP + width;
-        if let Some(t) = &text {
-            t.draw(dc, right, h, &brush);
+        if let (Some(t), Some(tx)) = (&text, tx) {
+            t.draw_text(dc, tx, h, fonts.cap, &brush);
         }
-        let gx = right + width - glyph.width;
         if let Some(under) = icon.under {
             Label::new(dwrite, &under.to_string(), font)?.draw(dc, gx, h, &faint);
         }
         glyph.draw(dc, gx, h, if icon.alert { &alert } else { &brush });
+        edge = new_edge;
+        gap = theme::MENUBAR_GAP;
     }
 
     if !st.app_name.is_empty() {
-        let max = right - theme::MENUBAR_GAP - left;
-        Label::fitted(dwrite, &st.app_name, &fonts.bold, max)?.draw(dc, left, h, &brush);
+        let max = edge - theme::MENUBAR_GAP - left;
+        Label::fitted(dwrite, &st.app_name, &fonts.bold, max)?.draw_text(dc, left, h, fonts.cap, &brush);
     }
     Ok(())
 }
