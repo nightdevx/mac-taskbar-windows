@@ -208,6 +208,9 @@ impl Popup {
     fn appear(&self, wp: i32, pivot_y: i32) {
         let comp = self.comp.borrow();
         let Some(c) = comp.as_ref() else { return };
+        if !theme::animations() {
+            return;
+        }
         let comp_ = &self.gfx.compositor;
         let run = || -> Result<()> {
             let duration = TimeSpan {

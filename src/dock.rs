@@ -1086,7 +1086,7 @@ impl Dock {
     /// stopped for attention. Runs on the compositor; the icon's Translation
     /// moves, so magnification (Offset/Scale) keeps working meanwhile.
     fn bounce(&self, source: &str, attention: bool) {
-        if self.hidden || self.bouncing.borrow().contains_key(source) {
+        if self.hidden || !theme::animations() || self.bouncing.borrow().contains_key(source) {
             return;
         }
         let items = self.items.borrow();

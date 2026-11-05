@@ -198,3 +198,24 @@ pub fn set_dark(dark: bool) {
         );
     }
 }
+
+/// Windows "Animation effects" (Accessibility > Visual effects). Off means
+/// opening, sliding and bouncing animations are skipped.
+pub fn animations() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW};
+    let mut on = windows::core::BOOL(1);
+    unsafe {
+        _ = SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut _ as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+    }
+    on.as_bool()
+}
+
+#[cfg(test)]
+mod animation_tests {
+    /// Real setting: `cargo test animation_setting -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn animation_setting() {
+        println!("animations: {}", super::animations());
+    }
+}

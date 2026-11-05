@@ -610,6 +610,13 @@ impl Launchpad {
         let comp_ = &self.gfx.compositor;
         let (w, h) = self.size.get();
         let s = self.scale.get();
+        if !theme::animations() {
+            _ = c.pages.StopAnimation(&HSTRING::from("Scale"));
+            _ = c.pages.StopAnimation(&HSTRING::from("Opacity"));
+            _ = c.pages.SetScale(Vector3 { X: 1.0, Y: 1.0, Z: 1.0 });
+            _ = c.pages.SetOpacity(1.0);
+            return;
+        }
         let run = || -> Result<()> {
             let ms = if opening { OPEN_MS } else { CLOSE_MS };
             let (from, to) = if opening { (1.1, 1.0) } else { (1.0, 1.08) };
@@ -635,6 +642,9 @@ impl Launchpad {
             return;
         }
         crate::touchpad::listen(self.popup().hwnd, false);
+        if !theme::animations() {
+            return self.finish_close();
+        }
         self.animate_pages(false);
         self.popup().fade_out(CLOSE_MS);
         unsafe { SetTimer(Some(self.popup().hwnd), TIMER_CLOSE, CLOSE_MS as u32, None) };
@@ -689,7 +699,7 @@ impl Launchpad {
         let (w, _) = self.size.get();
         let s = self.scale.get();
         if let Some(c) = self.comp.borrow().as_ref() {
-            _ = c.pages.SetImplicitAnimations(if animate { &c.slide } else { &c.still });
+            _ = c.pages.SetImplicitAnimations(if animate && theme::animations() { &c.slide } else { &c.still });
             _ = c.pages.SetOffset(Vector3 { X: -(p as f32) * w * s, Y: 0.0, Z: 0.0 });
             _ = c.hover.SetIsVisible(false);
         }
