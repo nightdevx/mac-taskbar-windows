@@ -109,6 +109,7 @@ pub struct MenuBar {
     state: RefCell<State>,
     comp: RefCell<Option<Comp>>,
     sources: OnceCell<Sources>,
+    status: Cell<status::Status>,
     /// Guards `place()`: the AppBar calls dispatch sent messages and can re-enter.
     placing: Cell<bool>,
     taskbar_created: u32,
@@ -138,6 +139,7 @@ impl MenuBar {
             state: RefCell::new(State { app_name: String::new(), clock: String::new(), status: Vec::new(), palette }),
             comp: RefCell::new(None),
             sources: OnceCell::new(),
+            status: Cell::new(status::Status::default()),
             placing: Cell::new(false),
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
         }));
@@ -170,9 +172,10 @@ impl MenuBar {
         }
         bar.set_app(unsafe { GetForegroundWindow() });
         let sources = Sources::start(hwnd);
-        log::info(&format!("status at start: {:?}", sources.read()));
+        let st = sources.read();
+        log::info(&format!("status at start: {st:?}"));
         _ = bar.sources.set(sources);
-        bar.refresh_status();
+        bar.set_status(st);
         bar.refresh_clock();
         if !hidden {
             unsafe { _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
@@ -271,9 +274,26 @@ impl MenuBar {
         self.redraw();
     }
 
-    fn refresh_status(&self) {
+    /// Re-reads only the source that changed (a volume drag fires dozens of events).
+    fn refresh_status(&self, what: usize) {
         let Some(sources) = self.sources.get() else { return };
-        let icons = status::icons(&sources.read());
+        let mut st = self.status.get();
+        match what {
+            status::VOLUME => st.volume = sources.read_volume(),
+            status::NETWORK => st.net = status::read_net(),
+            status::AUDIO_DEVICE => {
+                sources.bind_audio();
+                st.volume = sources.read_volume();
+            }
+            _ => st.battery = status::read_battery(),
+        }
+        self.set_status(st);
+    }
+
+    /// Redraws only when an icon actually changes.
+    fn set_status(&self, st: status::Status) {
+        self.status.set(st);
+        let icons = status::icons(&st);
         if self.state.borrow().status == icons {
             return;
         }
@@ -298,16 +318,9 @@ impl MenuBar {
             WM_TIMER if wp.0 == TIMER_CLOCK => self.refresh_clock(),
             WM_TIMECHANGE => self.refresh_clock(),
             WM_FOREGROUND => self.set_app(HWND(wp.0 as *mut _)),
-            status::WM_STATUS => {
-                if wp.0 == status::AUDIO_DEVICE
-                    && let Some(s) = self.sources.get()
-                {
-                    s.bind_audio();
-                }
-                self.refresh_status();
-            }
+            status::WM_STATUS => self.refresh_status(wp.0),
             WM_POWERBROADCAST => {
-                self.refresh_status();
+                self.refresh_status(usize::MAX); // battery
                 return Some(LRESULT(1));
             }
             WM_APPBAR if wp.0 as u32 == ABN_POSCHANGED => self.place(),

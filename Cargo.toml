@@ -16,6 +16,7 @@ features = [
     "Foundation",
     "System",
     "Graphics_DirectX",
+    "Networking_Connectivity",
     "UI",
     "UI_Composition",
     "UI_Composition_Desktop",

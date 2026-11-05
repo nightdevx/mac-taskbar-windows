@@ -24,10 +24,11 @@ use windows::core::{PCWSTR, implement};
 use crate::log;
 
 pub const WM_STATUS: u32 = WM_APP + 3;
-/// `WM_STATUS` wparam: state changed, re-read it.
-pub const REFRESH: usize = 0;
-/// `WM_STATUS` wparam: default playback device changed, rebind first.
-pub const AUDIO_DEVICE: usize = 1;
+/// `WM_STATUS` wparam values: which source changed.
+pub const VOLUME: usize = 0;
+pub const NETWORK: usize = 1;
+/// Default playback device changed: rebind, then re-read the volume.
+pub const AUDIO_DEVICE: usize = 2;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Battery {
@@ -48,7 +49,7 @@ pub enum Net {
     Offline,
     NoInternet,
     Wired,
-    /// Signal quality 0..=100.
+    /// Signal bars 0..=5, as Windows reports them.
     Wifi(u8),
 }
 
@@ -90,11 +91,11 @@ pub fn volume_glyph(level: f32, muted: bool) -> char {
     }
 }
 
-pub fn wifi_glyph(signal: u8) -> char {
-    match signal {
-        0..25 => '\u{E872}',
-        25..50 => '\u{E873}',
-        50..75 => '\u{E874}',
+pub fn wifi_glyph(bars: u8) -> char {
+    match bars {
+        0 | 1 => '\u{E872}',
+        2 => '\u{E873}',
+        3 => '\u{E874}',
         _ => WIFI_FULL,
     }
 }
@@ -127,7 +128,7 @@ struct VolumeChanged(isize);
 
 impl IAudioEndpointVolumeCallback_Impl for VolumeChanged_Impl {
     fn OnNotify(&self, _: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> windows::core::Result<()> {
-        post(self.0, REFRESH);
+        post(self.0, VOLUME);
         Ok(())
     }
 }
@@ -157,7 +158,7 @@ impl IMMNotificationClient_Impl for DeviceChanged_Impl {
 }
 
 unsafe extern "system" fn on_connectivity(ctx: *const c_void, _: NL_NETWORK_CONNECTIVITY_HINT) {
-    post(ctx as isize, REFRESH);
+    post(ctx as isize, NETWORK);
 }
 
 unsafe extern "system" fn on_wlan(data: *mut L2_NOTIFICATION_DATA, ctx: *mut c_void) {
@@ -169,7 +170,7 @@ unsafe extern "system" fn on_wlan(data: *mut L2_NOTIFICATION_DATA, ctx: *mut c_v
         _ => false,
     };
     if relevant {
-        post(ctx as isize, REFRESH);
+        post(ctx as isize, NETWORK);
     }
 }
 
@@ -178,7 +179,6 @@ pub struct Sources {
     volume_cb: IAudioEndpointVolumeCallback,
     _device_cb: IMMNotificationClient,
     endpoint: RefCell<Option<IAudioEndpointVolume>>,
-    wlan: Option<HANDLE>,
 }
 
 impl Sources {
@@ -208,18 +208,17 @@ impl Sources {
             }
         }
 
-        let wlan = unsafe {
+        // WLAN events only wake us for signal changes; the handle stays open for the process lifetime.
+        // Without a Wi-Fi service (desktop on cable) WlanOpenHandle fails and nothing is registered.
+        unsafe {
             let mut version = 0;
             let mut handle = HANDLE::default();
             if WlanOpenHandle(2, None, &mut version, &mut handle) == 0 {
                 WlanRegisterNotification(handle, WLAN_NOTIFICATION_SOURCE_ACM | WLAN_NOTIFICATION_SOURCE_MSM, true, Some(on_wlan), Some(ctx as *const c_void), None, None);
-                Some(handle)
-            } else {
-                None // no Wi-Fi service, desktop on cable
             }
-        };
+        }
 
-        let sources = Sources { enumerator, volume_cb, _device_cb: device_cb, endpoint: RefCell::new(None), wlan };
+        let sources = Sources { enumerator, volume_cb, _device_cb: device_cb, endpoint: RefCell::new(None) };
         sources.bind_audio();
         sources
     }
@@ -244,33 +243,44 @@ impl Sources {
     }
 
     pub fn read(&self) -> Status {
-        Status { battery: read_battery(), volume: self.read_volume(), net: self.read_net() }
+        Status { battery: read_battery(), volume: self.read_volume(), net: read_net() }
     }
 
-    fn read_volume(&self) -> Option<Volume> {
+    pub fn read_volume(&self) -> Option<Volume> {
         let ep = self.endpoint.borrow();
         let ep = ep.as_ref()?;
         unsafe { Some(Volume { level: ep.GetMasterVolumeLevelScalar().ok()?, muted: ep.GetMute().ok()?.as_bool() }) }
     }
 
-    #[allow(non_upper_case_globals)] // windows-rs constant names
-    fn read_net(&self) -> Net {
-        let mut hint = NL_NETWORK_CONNECTIVITY_HINT::default();
-        if unsafe { GetNetworkConnectivityHint(&mut hint) }.is_err() {
-            return Net::Unknown;
-        }
-        let wifi = self.wlan.and_then(wifi_signal);
-        match (hint.ConnectivityLevel, wifi) {
-            (NetworkConnectivityLevelHintInternetAccess, Some(s)) => Net::Wifi(s),
-            (NetworkConnectivityLevelHintInternetAccess, None) => Net::Wired,
-            (NetworkConnectivityLevelHintLocalAccess | NetworkConnectivityLevelHintConstrainedInternetAccess, _) => Net::NoInternet,
-            (NetworkConnectivityLevelHintNone, _) => Net::Offline,
-            _ => Net::Unknown,
-        }
+}
+
+/// Signal bars come from the connection profile: on Windows 11 the WLAN API
+/// refuses connection details to desktop apps without location permission
+/// (`WlanQueryInterface` returns ERROR_ACCESS_DENIED).
+#[allow(non_upper_case_globals)] // windows-rs constant names
+pub fn read_net() -> Net {
+    use windows::Networking::Connectivity::{NetworkConnectivityLevel, NetworkInformation};
+    if let Ok(p) = NetworkInformation::GetInternetConnectionProfile()
+        && p.GetNetworkConnectivityLevel().is_ok_and(|l| l == NetworkConnectivityLevel::InternetAccess)
+    {
+        return if p.IsWlanConnectionProfile().unwrap_or(false) {
+            Net::Wifi(p.GetSignalBars().and_then(|b| b.Value()).unwrap_or(0))
+        } else {
+            Net::Wired
+        };
+    }
+    let mut hint = NL_NETWORK_CONNECTIVITY_HINT::default();
+    if unsafe { GetNetworkConnectivityHint(&mut hint) }.is_err() {
+        return Net::Unknown;
+    }
+    match hint.ConnectivityLevel {
+        NetworkConnectivityLevelHintNone => Net::Offline,
+        NetworkConnectivityLevelHintLocalAccess | NetworkConnectivityLevelHintConstrainedInternetAccess => Net::NoInternet,
+        _ => Net::Unknown,
     }
 }
 
-fn read_battery() -> Option<Battery> {
+pub fn read_battery() -> Option<Battery> {
     let mut ps = SYSTEM_POWER_STATUS::default();
     unsafe { GetSystemPowerStatus(&mut ps).ok()? };
     // 128: no system battery, 255: unknown.
@@ -278,29 +288,6 @@ fn read_battery() -> Option<Battery> {
         return None;
     }
     Some(Battery { percent: ps.BatteryLifePercent, plugged: ps.ACLineStatus == 1 })
-}
-
-/// Signal quality of the first connected Wi-Fi interface.
-fn wifi_signal(wlan: HANDLE) -> Option<u8> {
-    unsafe {
-        let mut list: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
-        if WlanEnumInterfaces(wlan, None, &mut list) != 0 || list.is_null() {
-            return None;
-        }
-        let items = std::slice::from_raw_parts((*list).InterfaceInfo.as_ptr(), (*list).dwNumberOfItems as usize);
-        let signal = items.iter().filter(|i| i.isState == wlan_interface_state_connected).find_map(|i| {
-            let mut size = 0;
-            let mut data: *mut c_void = std::ptr::null_mut();
-            if WlanQueryInterface(wlan, &i.InterfaceGuid, wlan_intf_opcode_current_connection, None, &mut size, &mut data, None) != 0 || data.is_null() {
-                return None;
-            }
-            let q = (*(data as *const WLAN_CONNECTION_ATTRIBUTES)).wlanAssociationAttributes.wlanSignalQuality;
-            WlanFreeMemory(data);
-            Some(q.min(100) as u8)
-        });
-        WlanFreeMemory(list as *const c_void);
-        signal
-    }
 }
 
 #[cfg(test)]
@@ -333,10 +320,11 @@ mod tests {
     #[test]
     fn wifi_steps() {
         assert_eq!(wifi_glyph(0), '\u{E872}');
-        assert_eq!(wifi_glyph(24), '\u{E872}');
-        assert_eq!(wifi_glyph(25), '\u{E873}');
-        assert_eq!(wifi_glyph(74), '\u{E874}');
-        assert_eq!(wifi_glyph(100), WIFI_FULL);
+        assert_eq!(wifi_glyph(1), '\u{E872}');
+        assert_eq!(wifi_glyph(2), '\u{E873}');
+        assert_eq!(wifi_glyph(3), '\u{E874}');
+        assert_eq!(wifi_glyph(4), WIFI_FULL);
+        assert_eq!(wifi_glyph(5), WIFI_FULL);
     }
 
     #[test]
@@ -344,7 +332,7 @@ mod tests {
         let st = Status {
             battery: Some(Battery { percent: 50, plugged: false }),
             volume: Some(Volume { level: 0.5, muted: false }),
-            net: Net::Wifi(80),
+            net: Net::Wifi(5),
         };
         let glyphs: Vec<char> = icons(&st).iter().map(|i| i.glyph).collect();
         assert_eq!(glyphs, [WIFI_FULL, battery_glyph(50, false), volume_glyph(0.5, false)]);
@@ -352,4 +340,5 @@ mod tests {
         assert_eq!(icons(&wired).len(), 2);
         assert!(icons(&Status::default()).is_empty());
     }
+
 }

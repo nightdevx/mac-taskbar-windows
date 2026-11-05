@@ -41,7 +41,7 @@ pub fn run(path: &str) -> Result<()> {
                 status: status::icons(&status::Status {
                     battery: Some(status::Battery { percent: 72, plugged: false }),
                     volume: Some(status::Volume { level: 0.6, muted: false }),
-                    net: status::Net::Wifi(60),
+                    net: status::Net::Wifi(3),
                 }),
                 palette,
             };
