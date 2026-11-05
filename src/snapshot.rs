@@ -244,7 +244,22 @@ fn launchpad_png(path: &str, dwrite: &windows::Win32::Graphics::DirectWrite::IDW
             (src.clone(), icons::load(&src, px))
         })
         .collect();
-    let view = launchpad::View { size: (w, h), query: "", apps: &page, icons: &icons, loading: false, page: 0, pages: 3, hover: Some(8), scale: SCALE };
+    let selected: std::collections::HashSet<String> = page.iter().skip(2).take(2).map(|a| a.id.clone()).collect();
+    let view = launchpad::View {
+        size: (w, h),
+        query: "",
+        apps: &page,
+        icons: &icons,
+        loading: false,
+        page: 0,
+        pages: 3,
+        hover: Some(8),
+        scale: SCALE,
+        editing: true,
+        selected: &selected,
+        show_hidden: false,
+        hidden_count: 4,
+    };
     render_png(path, w, h, |dc| unsafe {
         let wall = dc.CreateSolidColorBrush(&Rgba(52, 60, 78, 255).d2d(), None)?;
         dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: w, bottom: h }, &wall);

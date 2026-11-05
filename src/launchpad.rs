@@ -118,6 +118,46 @@ pub fn filter(apps: &[App], query: &str) -> Vec<usize> {
     (0..apps.len()).filter(|i| q.is_empty() || apps[*i].name.to_lowercase().contains(&q)).collect()
 }
 
+/// Apps the current view lists: visible ones, or only the hidden ones.
+pub fn listed(apps: &[App], query: &str, hidden: &[String], show_hidden: bool) -> Vec<usize> {
+    filter(apps, query)
+        .into_iter()
+        .filter(|i| hidden.iter().any(|h| *h == apps[*i].id) == show_hidden)
+        .collect()
+}
+
+/// Pill buttons in the top row (DIPs): Edit/Done, Hide/Show (while editing),
+/// and the Hidden apps toggle on the right.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Button {
+    Edit,
+    Apply,
+    HiddenView,
+}
+
+const PILL_H: f32 = 30.0;
+
+pub fn button_rect(w: f32, h: f32, b: Button) -> D2D_RECT_F {
+    let g = grid(w, h);
+    let right = g.left + COLS as f32 * g.cell_w;
+    let (left, width) = match b {
+        Button::Edit => (g.left, 92.0),
+        Button::Apply => (g.left + 100.0, 120.0),
+        Button::HiddenView => (right - 170.0, 170.0),
+    };
+    D2D_RECT_F { left, top: SEARCH_TOP, right: left + width, bottom: SEARCH_TOP + PILL_H }
+}
+
+pub fn hit_button(w: f32, h: f32, editing: bool, x: f32, y: f32) -> Option<Button> {
+    [Button::Edit, Button::Apply, Button::HiddenView]
+        .into_iter()
+        .filter(|b| editing || *b != Button::Apply)
+        .find(|b| {
+            let r = button_rect(w, h, *b);
+            x >= r.left && x < r.right && y >= r.top && y < r.bottom
+        })
+}
+
 pub fn pages(n: usize) -> usize {
     n.div_ceil(PER_PAGE).max(1)
 }
@@ -195,6 +235,13 @@ pub struct View<'a> {
     pub pages: usize,
     pub hover: Option<usize>,
     pub scale: f32,
+    /// Selection mode: icons get check circles, clicks select.
+    pub editing: bool,
+    /// Selected app IDs (while editing).
+    pub selected: &'a HashSet<String>,
+    /// Listing hidden apps instead of visible ones.
+    pub show_hidden: bool,
+    pub hidden_count: usize,
 }
 
 pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &View) -> Result<()> {
@@ -206,6 +253,26 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &Vie
         let field = dc.CreateSolidColorBrush(&Rgba(255, 255, 255, 46).d2d(), None)?;
         let dim = dc.CreateSolidColorBrush(&Rgba(255, 255, 255, 150).d2d(), None)?;
         let hover = dc.CreateSolidColorBrush(&Rgba(255, 255, 255, 34).d2d(), None)?;
+        let accent = dc.CreateSolidColorBrush(&theme::accent().d2d(), None)?;
+        let ring = dc.CreateSolidColorBrush(&Rgba(255, 255, 255, 200).d2d(), None)?;
+
+        // Top row pills: Edit/Done, Hide/Show (k), Hidden apps.
+        let pill = |b: Button, label: &str, strong: bool| -> Result<()> {
+            let r = button_rect(w, h, b);
+            let fill = if strong { &accent } else { &field };
+            dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: PILL_H / 2.0, radiusY: PILL_H / 2.0 }, fill);
+            let l = Label::fitted(dwrite, label, &f.text, r.right - r.left - 20.0)?;
+            l.draw_text(dc, (r.left + r.right - l.width) / 2.0, r.top + r.bottom, f.cap, &white);
+            Ok(())
+        };
+        pill(Button::Edit, if v.editing { "Bitti" } else { "Düzenle" }, v.editing)?;
+        if v.editing {
+            let k = v.selected.len();
+            let label = if v.show_hidden { format!("Göster ({k})") } else { format!("Gizle ({k})") };
+            pill(Button::Apply, &label, k > 0)?;
+        }
+        let hidden_label = if v.show_hidden { "Tüm uygulamalar".to_string() } else { format!("Gizlenenler ({})", v.hidden_count) };
+        pill(Button::HiddenView, &hidden_label, v.show_hidden)?;
 
         // Search field, centred at the top.
         let sl = (w - SEARCH_W) / 2.0;
@@ -229,7 +296,13 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &Vie
         let icons = v.icons;
         let apps = v.apps;
         if apps.is_empty() {
-            let msg = if v.loading { "Uygulamalar yükleniyor…" } else { "Sonuç yok" };
+            let msg = if v.loading {
+                "Uygulamalar yükleniyor…"
+            } else if v.show_hidden && v.query.is_empty() {
+                "Gizlenen uygulama yok"
+            } else {
+                "Sonuç yok"
+            };
             let l = Label::new(dwrite, msg, &f.text)?;
             l.draw_text(dc, (w - l.width) / 2.0, h, f.cap, &dim);
         }
@@ -245,6 +318,20 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &Vie
                 let bmp = dc.CreateBitmap(D2D_SIZE_U { width: icon.size, height: icon.size }, Some(icon.pixels.as_ptr() as *const _), icon.size * 4, &props)?;
                 let rect = D2D_RECT_F { left: cx - g.icon / 2.0, top, right: cx + g.icon / 2.0, bottom: top + g.icon };
                 dc.DrawBitmap(&bmp, Some(&rect), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            }
+            if v.editing {
+                // macOS-style selection circle on the icon's top-left corner.
+                let c = Vector2 { X: cx - g.icon / 2.0 + 4.0, Y: top + 4.0 };
+                let e = D2D1_ELLIPSE { point: c, radiusX: 11.0, radiusY: 11.0 };
+                if v.selected.contains(&app.id) {
+                    dc.FillEllipse(&e, &accent);
+                    dc.DrawEllipse(&e, &white, 1.5, None);
+                    let mark = Label::new(dwrite, "\u{E73E}", &f.icons)?;
+                    mark.draw(dc, c.X - mark.width / 2.0, c.Y * 2.0, &white);
+                } else {
+                    dc.FillEllipse(&e, &shadow);
+                    dc.DrawEllipse(&e, &ring, 1.5, None);
+                }
             }
             // Name under the icon, white with a soft shadow for any wallpaper.
             let wide: Vec<u16> = app.name.encode_utf16().collect();
@@ -282,6 +369,9 @@ struct Launchpad {
     apps: RefCell<Vec<App>>,
     shown: RefCell<Vec<usize>>,
     query: RefCell<String>,
+    editing: Cell<bool>,
+    selected: RefCell<HashSet<String>>,
+    show_hidden: Cell<bool>,
     page: Cell<usize>,
     hover: Cell<Option<usize>>,
     icons: RefCell<HashMap<String, icons::Icon>>,
@@ -314,6 +404,9 @@ pub fn init(gfx: Rc<Gfx>) -> Result<()> {
         query: RefCell::new(String::new()),
         page: Cell::new(0),
         hover: Cell::new(None),
+        editing: Cell::new(false),
+        selected: RefCell::new(HashSet::new()),
+        show_hidden: Cell::new(false),
         icons: RefCell::new(HashMap::new()),
         requested: RefCell::new(HashSet::new()),
         size: Cell::new((0.0, 0.0)),
@@ -374,7 +467,8 @@ impl Launchpad {
     }
 
     fn refilter(&self) {
-        let shown = filter(&self.apps.borrow(), &self.query.borrow());
+        let hidden = crate::settings::get().hidden_apps;
+        let shown = listed(&self.apps.borrow(), &self.query.borrow(), &hidden, self.show_hidden.get());
         *self.shown.borrow_mut() = shown;
         self.page.set(self.page.get().min(pages(self.shown.borrow().len()) - 1));
         self.request_page();
@@ -430,14 +524,30 @@ impl Launchpad {
             pages: pages(self.shown.borrow().len()),
             hover: self.hover.get(),
             scale: self.popup().scale(),
+            editing: self.editing.get(),
+            selected: &self.selected.borrow(),
+            show_hidden: self.show_hidden.get(),
+            hidden_count: crate::settings::get().hidden_apps.len(),
         };
         draw(dc, &self.gfx.dwrite, &fonts, &view)
     }
 
     fn click(&self, x: f32, y: f32) {
         let (w, h) = self.size.get();
+        if let Some(b) = hit_button(w, h, self.editing.get(), x, y) {
+            return self.press(b);
+        }
         let page = self.page_apps();
         if let Some(i) = hit(grid(w, h), page.len(), x, y) {
+            if self.editing.get() {
+                let id = page[i].id.clone();
+                let mut sel = self.selected.borrow_mut();
+                if !sel.remove(&id) {
+                    sel.insert(id);
+                }
+                drop(sel);
+                return self.redraw();
+            }
             return self.launch(&page[i]);
         }
         if let Some(p) = hit_dot(w, h, pages(self.shown.borrow().len()), x, y) {
@@ -447,6 +557,60 @@ impl Launchpad {
         if !in_search {
             self.close(); // macOS: a click on empty space closes Launchpad
         }
+    }
+
+    fn press(&self, b: Button) {
+        match b {
+            Button::Edit => {
+                self.editing.set(!self.editing.get());
+                self.selected.borrow_mut().clear();
+            }
+            Button::Apply => {
+                let picked: Vec<String> = self.selected.borrow_mut().drain().collect();
+                self.set_hidden(&picked, !self.show_hidden.get());
+                self.editing.set(false);
+            }
+            Button::HiddenView => {
+                self.show_hidden.set(!self.show_hidden.get());
+                self.selected.borrow_mut().clear();
+                self.page.set(0);
+            }
+        }
+        self.refilter();
+        self.redraw();
+    }
+
+    /// Hides (or shows again) `ids` in Launchpad and saves it.
+    fn set_hidden(&self, ids: &[String], hide: bool) {
+        if ids.is_empty() {
+            return;
+        }
+        crate::settings::update(|s| {
+            s.hidden_apps.retain(|h| !ids.contains(h));
+            if hide {
+                s.hidden_apps.extend(ids.iter().cloned());
+            }
+        });
+    }
+
+    /// Right click on an app: hide it (or show it again in the hidden view).
+    fn quick_menu(&self, x: f32, y: f32) {
+        let (w, h) = self.size.get();
+        let page = self.page_apps();
+        let Some(i) = hit(grid(w, h), page.len(), x, y) else { return };
+        let id = page[i].id.clone();
+        let hide = !self.show_hidden.get();
+        let entries = vec![crate::menu::Entry::item(1, if hide { "Launchpad'de gizle" } else { "Launchpad'de göster" })];
+        let mut pt = POINT::default();
+        unsafe { _ = GetCursorPos(&mut pt) };
+        let lp: &'static Launchpad = unsafe { &*(self as *const Launchpad) };
+        crate::menu::show(entries, pt.x, crate::popup::Place::Below(pt.y), move |pick| {
+            if pick == 1 {
+                lp.set_hidden(&[id], hide);
+                lp.refilter();
+                lp.redraw();
+            }
+        });
     }
 
     fn type_char(&self, c: char) {
@@ -496,6 +660,10 @@ impl Handler for Launchpad {
                 let (x, y) = popup::point(lp, self.popup().scale());
                 self.click(x, y);
             }
+            WM_RBUTTONUP => {
+                let (x, y) = popup::point(lp, self.popup().scale());
+                self.quick_menu(x, y);
+            }
             WM_MOUSEWHEEL => {
                 let delta = ((wp.0 >> 16) & 0xFFFF) as i16;
                 let p = self.page.get();
@@ -509,7 +677,9 @@ impl Handler for Launchpad {
             WM_KEYDOWN => {
                 let vk = wp.0 as u16;
                 if vk == VK_ESCAPE.0 {
-                    if self.query.borrow().is_empty() {
+                    if self.editing.get() {
+                        self.press(Button::Edit);
+                    } else if self.query.borrow().is_empty() {
                         self.close();
                     } else {
                         self.query.borrow_mut().clear();
@@ -581,6 +751,29 @@ mod tests {
         assert_eq!(filter(&apps, "STUDIO"), [2]);
         assert_eq!(filter(&apps, "makine"), [1]);
         assert!(filter(&apps, "xyz").is_empty());
+    }
+
+    #[test]
+    fn hidden_apps_move_between_views() {
+        let apps = [app("A"), app("B"), app("C")];
+        let hidden = vec!["B".to_string()];
+        assert_eq!(listed(&apps, "", &hidden, false), [0, 2]);
+        assert_eq!(listed(&apps, "", &hidden, true), [1]);
+        assert!(listed(&apps, "a", &hidden, true).is_empty(), "search works inside each view");
+    }
+
+    #[test]
+    fn top_row_buttons() {
+        let (w, h) = (1600.0, 1000.0);
+        let e = button_rect(w, h, Button::Edit);
+        assert_eq!(hit_button(w, h, false, e.left + 5.0, e.top + 5.0), Some(Button::Edit));
+        let a = button_rect(w, h, Button::Apply);
+        assert_eq!(hit_button(w, h, false, a.left + 5.0, a.top + 5.0), None, "Hide only while editing");
+        assert_eq!(hit_button(w, h, true, a.left + 5.0, a.top + 5.0), Some(Button::Apply));
+        let hv = button_rect(w, h, Button::HiddenView);
+        assert_eq!(hit_button(w, h, false, hv.right - 5.0, hv.top + 5.0), Some(Button::HiddenView));
+        let s = (w - SEARCH_W) / 2.0;
+        assert!(a.right < s && hv.left > s + SEARCH_W, "pills clear the search field");
     }
 
     #[test]

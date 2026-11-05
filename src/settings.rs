@@ -24,6 +24,8 @@ pub struct Settings {
     pub pins: Option<Vec<String>>,
     /// Folders right of the dock separator (stacks). `None`: Downloads.
     pub folders: Option<Vec<String>>,
+    /// Apps hidden from Launchpad (Apps folder IDs).
+    pub hidden_apps: Vec<String>,
     pub battery_percent: bool,
 }
 
@@ -36,6 +38,7 @@ impl Default for Settings {
             dock_magnify: 1.5,
             pins: None,
             folders: None,
+            hidden_apps: Vec::new(),
             battery_percent: true,
         }
     }
@@ -79,6 +82,7 @@ pub fn parse(text: &str) -> Settings {
             "pin" => s.pins.get_or_insert_with(Vec::new).push(value.to_string()),
             "folders" if value.is_empty() => s.folders = Some(Vec::new()),
             "folder" => s.folders.get_or_insert_with(Vec::new).push(value.to_string()),
+            "hide" => s.hidden_apps.push(value.to_string()),
             _ => {}
         }
     }
@@ -102,6 +106,7 @@ pub fn format(s: &Settings) -> String {
         Some(f) => f.iter().for_each(|p| out.push_str(&format!("folder = {p}\n"))),
         None => {}
     }
+    s.hidden_apps.iter().for_each(|id| out.push_str(&format!("hide = {id}\n")));
     out
 }
 
@@ -184,6 +189,7 @@ mod tests {
             dock_magnify: 1.75,
             pins: Some(vec![r"C:\a\b.lnk".into(), r"shell:AppsFolder\X!App".into()]),
             folders: Some(vec![r"C:\Users\u\Downloads".into()]),
+            hidden_apps: vec!["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into()],
             battery_percent: false,
         };
         assert_eq!(parse(&format(&s)), s);
