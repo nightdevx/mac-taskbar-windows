@@ -12,7 +12,7 @@ use windows_numerics::Matrix3x2;
 
 use crate::menubar::{self, Fonts, State};
 use crate::theme::{self, Rgba};
-use crate::{clock, gfx};
+use crate::{clock, gfx, status};
 
 const SCALE: f32 = 1.5;
 const WIDTH: f32 = 1280.0;
@@ -38,7 +38,11 @@ pub fn run(path: &str) -> Result<()> {
             let st = State {
                 app_name: "Gezgin".into(),
                 clock: clock::text(&clock::now()),
-                status: vec!['\u{E995}', '\u{E701}', '\u{E83F}'],
+                status: status::icons(&status::Status {
+                    battery: Some(status::Battery { percent: 72, plugged: false }),
+                    volume: Some(status::Volume { level: 0.6, muted: false }),
+                    net: status::Net::Wifi(60),
+                }),
                 palette,
             };
             menubar::draw(dc, &dwrite, &fonts, &st, WIDTH, bar_h)?;

@@ -36,6 +36,7 @@ name = "taskbar"
 version = "0.1.0"
 dependencies = [
  "windows",
+ "windows-core",
  "windows-numerics",
 ]
 

@@ -7,6 +7,7 @@ mod gfx;
 mod log;
 mod menubar;
 mod snapshot;
+mod status;
 mod theme;
 
 use std::rc::Rc;

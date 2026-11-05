@@ -1,6 +1,6 @@
 //! Top menu bar: system symbol, active app name, status icons, clock.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
@@ -19,6 +19,7 @@ use windows_numerics::Vector2;
 
 use crate::gfx::{self, Gfx, Label};
 use crate::theme::{self, Palette};
+use crate::status::{self, Icon, Sources};
 use crate::{appbar, appid, clock, log};
 
 pub const CLASS: PCWSTR = w!("TaskbarMenuBar");
@@ -50,14 +51,15 @@ impl Fonts {
 pub struct State {
     pub app_name: String,
     pub clock: String,
-    /// Status glyphs, drawn right to left before the clock.
-    pub status: Vec<char>,
+    /// Status icons, drawn right to left before the clock.
+    pub status: Vec<Icon>,
     pub palette: Palette,
 }
 
 /// Draws bar content (not the background) in DIPs on a transparent target.
 pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, st: &State, w: f32, h: f32) -> Result<()> {
     let brush = unsafe { dc.CreateSolidColorBrush(&st.palette.text.d2d(), None)? };
+    let faint = unsafe { dc.CreateSolidColorBrush(&theme::Rgba(st.palette.text.0, st.palette.text.1, st.palette.text.2, st.palette.text.3 / 3).d2d(), None)? };
     let pad = theme::MENUBAR_PAD_X;
 
     // System symbol: a plain dot until F4.4 gives it a menu and a final shape.
@@ -75,13 +77,16 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, st:
     let clock = Label::new(dwrite, &st.clock, &fonts.text)?;
     let mut right = w - pad - clock.width;
     clock.draw(dc, right, h, &brush);
-    for glyph in &st.status {
-        let icon = Label::new(dwrite, &glyph.to_string(), &fonts.icons)?;
-        right -= theme::MENUBAR_GAP + icon.width;
+    for icon in &st.status {
+        let label = Label::new(dwrite, &icon.glyph.to_string(), &fonts.icons)?;
+        right -= theme::MENUBAR_GAP + label.width;
         if right < x + theme::MENUBAR_GAP {
             break; // ponytail: icons that do not fit are dropped; overflow menu when the tray lands (F5.1)
         }
-        icon.draw(dc, right, h, &brush);
+        if let Some(under) = icon.under {
+            Label::new(dwrite, &under.to_string(), &fonts.icons)?.draw(dc, right, h, &faint);
+        }
+        label.draw(dc, right, h, &brush);
     }
     Ok(())
 }
@@ -103,6 +108,7 @@ pub struct MenuBar {
     size: Cell<(i32, i32)>,
     state: RefCell<State>,
     comp: RefCell<Option<Comp>>,
+    sources: OnceCell<Sources>,
     /// Guards `place()`: the AppBar calls dispatch sent messages and can re-enter.
     placing: Cell<bool>,
     taskbar_created: u32,
@@ -131,6 +137,7 @@ impl MenuBar {
             size: Cell::new((0, 0)),
             state: RefCell::new(State { app_name: String::new(), clock: String::new(), status: Vec::new(), palette }),
             comp: RefCell::new(None),
+            sources: OnceCell::new(),
             placing: Cell::new(false),
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
         }));
@@ -162,6 +169,10 @@ impl MenuBar {
             SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         }
         bar.set_app(unsafe { GetForegroundWindow() });
+        let sources = Sources::start(hwnd);
+        log::info(&format!("status at start: {:?}", sources.read()));
+        _ = bar.sources.set(sources);
+        bar.refresh_status();
         bar.refresh_clock();
         if !hidden {
             unsafe { _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
@@ -260,6 +271,16 @@ impl MenuBar {
         self.redraw();
     }
 
+    fn refresh_status(&self) {
+        let Some(sources) = self.sources.get() else { return };
+        let icons = status::icons(&sources.read());
+        if self.state.borrow().status == icons {
+            return;
+        }
+        self.state.borrow_mut().status = icons;
+        self.redraw();
+    }
+
     fn refresh_palette(&self) {
         let palette = theme::system_palette();
         if self.state.borrow().palette == palette {
@@ -277,6 +298,18 @@ impl MenuBar {
             WM_TIMER if wp.0 == TIMER_CLOCK => self.refresh_clock(),
             WM_TIMECHANGE => self.refresh_clock(),
             WM_FOREGROUND => self.set_app(HWND(wp.0 as *mut _)),
+            status::WM_STATUS => {
+                if wp.0 == status::AUDIO_DEVICE
+                    && let Some(s) = self.sources.get()
+                {
+                    s.bind_audio();
+                }
+                self.refresh_status();
+            }
+            WM_POWERBROADCAST => {
+                self.refresh_status();
+                return Some(LRESULT(1));
+            }
             WM_APPBAR if wp.0 as u32 == ABN_POSCHANGED => self.place(),
             WM_DPICHANGED | WM_DISPLAYCHANGE => self.place(),
             WM_SETTINGCHANGE => {
