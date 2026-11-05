@@ -8,6 +8,7 @@ mod gfx;
 mod icons;
 mod log;
 mod menubar;
+mod shelltray;
 mod snapshot;
 mod status;
 mod theme;
@@ -20,6 +21,7 @@ use std::time::Instant;
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
+use windows::Win32::System::Diagnostics::Debug::{EXCEPTION_POINTERS, SetUnhandledExceptionFilter};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::System::WinRT::{CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
@@ -32,7 +34,9 @@ fn main() {
     let flag = |name: &str| args.iter().any(|a| a == name);
     let result = if let Some(i) = args.iter().position(|a| a == "--snapshot") {
         snapshot::run(args.get(i + 1).map_or("snapshot.png", String::as_str))
-
+    } else if flag("--restore") {
+        shelltray::restore();
+        Ok(())
     } else if flag("--quit") {
         quit_running();
         Ok(())
@@ -68,6 +72,10 @@ fn run(hidden: bool) -> Result<()> {
     let gfx = Rc::new(gfx::Gfx::new()?);
     menubar::MenuBar::create(gfx.clone(), hidden)?;
     dock::Dock::create(gfx, hidden)?;
+    if !hidden {
+        shelltray::hide();
+        unsafe { SetUnhandledExceptionFilter(Some(on_crash)) };
+    }
     log::info(&format!("started in {} ms (hidden: {hidden})", started.elapsed().as_millis()));
 
     let mut msg = MSG::default();
@@ -76,6 +84,9 @@ fn run(hidden: bool) -> Result<()> {
             _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+    if !hidden {
+        shelltray::restore();
     }
     log::info("exit");
     Ok(())
@@ -91,6 +102,13 @@ fn quit_running() {
             }
         }
     }
+}
+
+/// Last chance after a crash outside Rust's panic machinery: give the taskbar back.
+unsafe extern "system" fn on_crash(_: *const EXCEPTION_POINTERS) -> i32 {
+    log::error("unhandled exception");
+    shelltray::restore();
+    0 // EXCEPTION_CONTINUE_SEARCH
 }
 
 /// Ctrl+C in a debug console closes cleanly instead of leaving a reserved edge behind.

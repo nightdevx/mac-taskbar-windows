@@ -40,9 +40,10 @@ pub fn error(msg: &str) {
     write("error", msg);
 }
 
-/// Logs panics. Release builds abort after the hook, so this is the last word.
+/// Logs panics and gives the Windows taskbar back. Release builds abort after the hook.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         write("panic", &info.to_string());
+        crate::shelltray::restore();
     }));
 }

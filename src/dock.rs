@@ -489,9 +489,13 @@ impl Handler for Dock {
                 unsafe { _ = DeregisterShellHookWindow(hwnd) };
             }
             m if m == self.taskbar_created && !self.hidden => {
+                // Explorer restarted: new taskbar to hide, every AppBar forgotten.
+                crate::shelltray::hide();
                 appbar::register(hwnd, WM_APPBAR);
                 self.place();
             }
+            // Logging off: Explorer saves the auto-hide setting, so put the user's back first.
+            WM_ENDSESSION if wp.0 != 0 && !self.hidden => crate::shelltray::restore(),
             _ => return None,
         }
         Some(LRESULT(0))
