@@ -25,7 +25,7 @@ use windows_numerics::{Vector2, Vector3};
 use crate::appid::{self, AppIdentity};
 use crate::gfx::Gfx;
 use crate::icons::{self, Loader};
-use crate::settings::{self, Settings};
+use crate::settings::{DockSide, self, Settings};
 use crate::theme::{self, Palette};
 use crate::window::{self, Backdrop, Handler};
 use crate::winlist::{self, ShellEvent};
@@ -117,6 +117,25 @@ impl Geometry {
     pub fn item_x(self, i: usize) -> f32 {
         let past_sep = self.sep.is_some_and(|s| s > 0 && i >= s);
         self.pad() + i as f32 * (self.icon + self.gap()) + if past_sep { self.sep_w() } else { 0.0 }
+    }
+}
+
+/// Window position of a box laid out as on a bottom dock: `a` along the dock,
+/// `c` from the far side towards the screen edge, `sc` thick across; `lh` is
+/// the window's thickness across the dock. Side docks turn this a quarter.
+pub fn turn(side: DockSide, lh: f32, a: f32, c: f32, sc: f32) -> (f32, f32) {
+    match side {
+        DockSide::Bottom => (a, c),
+        DockSide::Left => (lh - c - sc, a),
+        DockSide::Right => (c, a),
+    }
+}
+
+/// Window size of a box `sa` along and `sc` across the dock.
+pub fn self_dims(side: DockSide, sa: f32, sc: f32) -> (f32, f32) {
+    match side {
+        DockSide::Bottom => (sa, sc),
+        _ => (sc, sa),
     }
 }
 
@@ -363,6 +382,57 @@ impl Dock {
         settings::get().dock_autohide
     }
 
+    fn side(&self) -> DockSide {
+        settings::get().dock_side
+    }
+
+    // The dock is laid out as if it sat at the bottom: `a` runs along it, `c`
+    // across it from the far side towards the screen edge (px). Side docks
+    // turn that a quarter, so icons still grow away from the edge.
+
+    /// Window px offset of a box at (`a`, `c`), `sc` thick across the dock.
+    fn at(&self, a: f32, c: f32, sc: f32) -> Vector3 {
+        let (x, y) = turn(self.side(), self.size.get().1 as f32, a, c, sc);
+        Vector3 { X: x, Y: y, Z: 0.0 }
+    }
+
+    fn dims(&self, sa: f32, sc: f32) -> Vector2 {
+        let (x, y) = self_dims(self.side(), sa, sc);
+        Vector2 { X: x, Y: y }
+    }
+
+    /// A point inside a box `sc` thick across the dock, for centre points.
+    fn inside(&self, pa: f32, pc: f32, sc: f32) -> Vector3 {
+        let (x, y) = match self.side() {
+            DockSide::Bottom => (pa, pc),
+            DockSide::Left => (sc - pc, pa),
+            DockSide::Right => (pc, pa),
+        };
+        Vector3 { X: x, Y: y, Z: 0.0 }
+    }
+
+    /// Popup anchor for a dock point (`a`, `c`) in DIPs: beside the dock, on its far side.
+    fn anchor(&self, a: f32, c: f32) -> (i32, popup::Place) {
+        let s = self.scale();
+        let mut rc = RECT::default();
+        unsafe { _ = GetWindowRect(self.hwnd.get(), &mut rc) };
+        let (a, c) = ((a * s).round() as i32, (c * s).round() as i32);
+        let lh = self.size.get().1;
+        match self.side() {
+            DockSide::Bottom => (rc.left + a, popup::Place::Above(rc.top + c)),
+            DockSide::Left => (rc.top + a, popup::Place::RightOf(rc.left + lh - c)),
+            DockSide::Right => (rc.top + a, popup::Place::LeftOf(rc.left + c)),
+        }
+    }
+
+    fn edge(&self) -> appbar::Edge {
+        match self.side() {
+            DockSide::Bottom => appbar::Edge::Bottom,
+            DockSide::Left => appbar::Edge::Left,
+            DockSide::Right => appbar::Edge::Right,
+        }
+    }
+
     fn init_visuals(&self) -> Result<()> {
         let c = &self.gfx.compositor;
         let target = self.gfx.target(self.hwnd.get())?;
@@ -473,9 +543,9 @@ impl Dock {
         self.dpi.set(dpi);
         let thickness = self.thickness_px();
         let strip = if self.registered.get() {
-            appbar::set_edge(self.hwnd.get(), appbar::Edge::Bottom, monitor, thickness)
+            appbar::set_edge(self.hwnd.get(), self.edge(), monitor, thickness)
         } else {
-            appbar::edge_rect(monitor, appbar::Edge::Bottom, thickness)
+            appbar::edge_rect(monitor, self.edge(), thickness)
         };
         self.strip.set(strip);
         self.draw_dot();
@@ -494,25 +564,28 @@ impl Dock {
         let w = ((g.width(n) + 2.0 * side) * s).round() as i32;
         let h = self.thickness_px() + (above * s).round() as i32;
         let strip = self.strip.get();
-        let x = (strip.left + strip.right) / 2 - w / 2;
+        let (mid_x, mid_y) = ((strip.left + strip.right) / 2, (strip.top + strip.bottom) / 2);
+        let (x, y, ww, wh) = match self.side() {
+            DockSide::Bottom => (mid_x - w / 2, strip.bottom - h, w, h),
+            DockSide::Left => (strip.left, mid_y - w / 2, h, w),
+            DockSide::Right => (strip.right - h, mid_y - w / 2, h, w),
+        };
         unsafe {
             _ = SetWindowPos(
                 self.hwnd.get(),
                 Some(HWND_TOPMOST),
                 x,
-                strip.bottom - h,
-                w,
-                h,
+                y,
+                ww,
+                wh,
                 SWP_NOACTIVATE,
             )
         };
+        // Logical size: along the dock, then across it.
         self.size.set((w, h));
         if let Some(c) = self.comp.borrow().as_ref() {
-            _ = c.items.SetOffset(Vector3 {
-                X: (side * s).round(),
-                Y: (above * s).round(),
-                Z: 0.0,
-            });
+            // Children carry the headroom themselves (see `at`).
+            _ = c.items.SetOffset(Vector3::default());
             _ = c.shape.SetCornerRadius(Vector2 {
                 X: g.radius() * s,
                 Y: g.radius() * s,
@@ -537,15 +610,10 @@ impl Dock {
         let comp = self.comp.borrow();
         let Some(c) = comp.as_ref() else { return };
         let (side, above) = self.headroom();
-        let frame = Vector2 {
-            X: ((l.right - l.left) * s).round(),
-            Y: (g.height() * s).round(),
-        };
-        _ = c.frame.SetOffset(Vector3 {
-            X: ((side + l.left) * s).round(),
-            Y: (above * s).round(),
-            Z: 0.0,
-        });
+        let (side_px, above_px) = ((side * s).round(), (above * s).round());
+        let (fa, fc) = (((l.right - l.left) * s).round(), (g.height() * s).round());
+        let frame = self.dims(fa, fc);
+        _ = c.frame.SetOffset(self.at(((side + l.left) * s).round(), above_px, fc));
         _ = c.frame.SetSize(frame);
         // Separator: centred in its room before the first folder/Trash item.
         let line_h = (g.icon * 0.7 * s).round();
@@ -553,8 +621,9 @@ impl Dock {
             Some(i) => {
                 let x = ((l.items[i].0 - g.sep_w() / 2.0 - g.gap() / 2.0) * s).round();
                 _ = c.sep_line.SetIsVisible(true);
-                _ = c.sep_line.SetSize(Vector2 { X: s.round().max(1.0), Y: line_h });
-                _ = c.sep_line.SetOffset(Vector3 { X: x, Y: ((g.pad() + g.icon) * s - line_h).round(), Z: 0.0 });
+                let line_w = s.round().max(1.0);
+                _ = c.sep_line.SetSize(self.dims(line_w, line_h));
+                _ = c.sep_line.SetOffset(self.at(side_px + x, above_px + ((g.pad() + g.icon) * s - line_h).round(), line_h));
                 _ = c.sep_brush.SetColor(theme::Rgba(self.palette.get().text.0, self.palette.get().text.1, self.palette.get().text.2, 70).ui());
             }
             None => _ = c.sep_line.SetIsVisible(false),
@@ -579,27 +648,15 @@ impl Dock {
             _ = item.dot.SetImplicitAnimations(anims);
             // Scale grows up from the bottom centre, like the macOS dock.
             _ = item.icon.SetSize(Vector2 { X: icon, Y: icon });
-            _ = item.icon.SetCenterPoint(Vector3 {
-                X: icon / 2.0,
-                Y: icon,
-                Z: 0.0,
-            });
+            _ = item.icon.SetCenterPoint(self.inside(icon / 2.0, icon, icon));
             _ = item.icon.SetScale(Vector3 {
                 X: *k,
                 Y: *k,
                 Z: 1.0,
             });
-            _ = item.icon.SetOffset(Vector3 {
-                X: centre - icon / 2.0,
-                Y: (g.pad() * s).round(),
-                Z: 0.0,
-            });
+            _ = item.icon.SetOffset(self.at(side_px + centre - icon / 2.0, above_px + (g.pad() * s).round(), icon));
             _ = item.dot.SetSize(Vector2 { X: dot, Y: dot });
-            _ = item.dot.SetOffset(Vector3 {
-                X: centre - dot / 2.0,
-                Y: dot_y,
-                Z: 0.0,
-            });
+            _ = item.dot.SetOffset(self.at(side_px + centre - dot / 2.0, above_px + dot_y, dot));
             _ = item
                 .dot
                 .SetIsVisible(indicators && !item.windows.is_empty());
@@ -615,21 +672,19 @@ impl Dock {
         let (side, _) = self.headroom();
         let left = (side * s).round() as i32;
         let right = w - left;
+        // Logical (along, across) rect to window px.
+        let rgn = |l: i32, t: i32, r: i32, b: i32| unsafe {
+            let (x0, y0) = turn(self.side(), h as f32, l as f32, t as f32, (b - t) as f32);
+            let size = self_dims(self.side(), (r - l) as f32, (b - t) as f32);
+            Some(CreateRectRgn(x0 as i32, y0 as i32, x0 as i32 + size.0 as i32, y0 as i32 + size.1 as i32))
+        };
         unsafe {
             if !self.shown.get() {
-                SetWindowRgn(
-                    self.hwnd.get(),
-                    Some(CreateRectRgn(left, h - TRIGGER_PX, right, h)),
-                    true,
-                );
+                SetWindowRgn(self.hwnd.get(), rgn(left, h - TRIGGER_PX, right, h), true);
             } else if self.pointer.get().is_some() || !self.bouncing.borrow().is_empty() {
                 SetWindowRgn(self.hwnd.get(), None, true);
             } else {
-                SetWindowRgn(
-                    self.hwnd.get(),
-                    Some(CreateRectRgn(left, h - self.thickness_px(), right, h)),
-                    true,
-                );
+                SetWindowRgn(self.hwnd.get(), rgn(left, h - self.thickness_px(), right, h), true);
             }
         }
     }
@@ -642,13 +697,14 @@ impl Dock {
     // ---- auto-hide ----
 
     fn slide_to(&self, out: bool) {
-        let y = if out { self.size.get().1 as f32 } else { 0.0 };
+        let d = if out { self.size.get().1 as f32 } else { 0.0 };
+        let (x, y) = match self.side() {
+            DockSide::Bottom => (0.0, d),
+            DockSide::Left => (-d, 0.0),
+            DockSide::Right => (d, 0.0),
+        };
         if let Some(c) = self.comp.borrow().as_ref() {
-            _ = c.slide.SetOffset(Vector3 {
-                X: 0.0,
-                Y: y,
-                Z: 0.0,
-            });
+            _ = c.slide.SetOffset(Vector3 { X: x, Y: y, Z: 0.0 });
         }
     }
 
@@ -711,18 +767,13 @@ impl Dock {
         self.position_items();
     }
 
-    /// Screen x of item `i`'s centre and y just above its (magnified) icon.
-    fn icon_anchor(&self, i: usize) -> (i32, i32) {
-        let s = self.scale();
+    /// Popup anchor at item `i`'s centre, just beyond its (magnified) icon.
+    fn icon_anchor(&self, i: usize) -> (i32, popup::Place) {
         let g = self.geometry();
         let l = magnify::layout(g, self.items.borrow().len(), self.pointer.get(), settings::get().dock_magnify);
         let (left, k) = l.items.get(i).copied().unwrap_or((0.0, 1.0));
         let (side, above) = self.headroom();
-        let mut rc = RECT::default();
-        unsafe { _ = GetWindowRect(self.hwnd.get(), &mut rc) };
-        let x = rc.left + ((side + left + g.icon * k / 2.0) * s).round() as i32;
-        let top = rc.top + ((above + g.pad() + g.icon * (1.0 - k) - 8.0) * s).round() as i32;
-        (x, top)
+        self.anchor(side + left + g.icon * k / 2.0, above + g.pad() + g.icon * (1.0 - k) - 8.0)
     }
 
     // ---- hover previews ----
@@ -745,8 +796,6 @@ impl Dock {
     }
 
     fn show_preview(&self, i: usize) {
-        let s = self.scale();
-        let g = self.geometry();
         let (windows, source) = {
             let items = self.items.borrow();
             let Some(item) = items.get(i) else { return };
@@ -755,26 +804,13 @@ impl Dock {
                 item.pin.clone().unwrap_or_else(|| item.source.clone()),
             )
         };
-        let l = magnify::layout(
-            g,
-            self.items.borrow().len(),
-            self.pointer.get(),
-            settings::get().dock_magnify,
-        );
-        let Some((left, k)) = l.items.get(i).copied() else {
-            return;
-        };
-        let (side, above) = self.headroom();
-        let mut rc = RECT::default();
-        unsafe { _ = GetWindowRect(self.hwnd.get(), &mut rc) };
-        let centre = rc.left + ((side + left + g.icon * k / 2.0) * s).round() as i32;
-        let icon_top = rc.top + ((above + g.pad() + g.icon * (1.0 - k)) * s).round() as i32;
         let name = if windows.is_empty() {
             appid::source_name(&source)
         } else {
             String::new()
         };
-        preview::show(&windows, &name, centre, icon_top - (8.0 * s) as i32);
+        let (anchor, place) = self.icon_anchor(i);
+        preview::show(&windows, &name, anchor, place);
     }
 
     /// Back to resting size; the region shrinks once the icons have settled.
@@ -1177,8 +1213,8 @@ impl Dock {
         };
         match kind {
             Kind::Folder => {
-                let (x, top) = self.icon_anchor(i);
-                return crate::stack::show(&source, x, top);
+                let (anchor, place) = self.icon_anchor(i);
+                return crate::stack::show(&source, anchor, place);
             }
             Kind::Trash => {
                 unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(TRASH), None, None, SW_SHOWNORMAL) };
@@ -1335,33 +1371,27 @@ impl Dock {
             entries.push(menu::Entry::item(SETTINGS, "Dock ayarları…"));
         }
 
-        // Anchor above the icon (or the pointer on the dock itself).
-        let s = self.scale();
-        let g = self.geometry();
-        let mut rc = RECT::default();
-        let mut pt = POINT::default();
-        unsafe {
-            _ = GetWindowRect(self.hwnd.get(), &mut rc);
-            _ = GetCursorPos(&mut pt);
-        }
-        let (side, above) = self.headroom();
-        let anchor_x = index
-            .and_then(|i| {
-                let l = magnify::layout(
-                    g,
-                    self.items.borrow().len(),
-                    self.pointer.get(),
-                    settings::get().dock_magnify,
-                );
-                l.items.get(i).map(|(left, k)| {
-                    rc.left + ((side + left + g.icon * k / 2.0) * s).round() as i32
-                })
-            })
-            .unwrap_or(pt.x);
-        let anchor_bottom = rc.top + ((above - 6.0) * s).round() as i32;
+        // Anchor beyond the icon (or the pointer on the dock itself).
+        let (anchor, place) = match index {
+            Some(i) => self.icon_anchor(i),
+            None => {
+                let s = self.scale();
+                let mut rc = RECT::default();
+                let mut pt = POINT::default();
+                unsafe {
+                    _ = GetWindowRect(self.hwnd.get(), &mut rc);
+                    _ = GetCursorPos(&mut pt);
+                }
+                let along = match self.side() {
+                    DockSide::Bottom => pt.x - rc.left,
+                    _ => pt.y - rc.top,
+                };
+                self.anchor(along as f32 / s, self.headroom().1 - 6.0)
+            }
+        };
         self.hold(1); // stay out while the menu is open
         let dock: &'static Dock = unsafe { &*(self as *const Dock) };
-        menu::show(entries, anchor_x, popup::Place::Above(anchor_bottom), move |id| match id {
+        menu::show(entries, anchor, place, move |id| match id {
             NEW => {
                 if let Some((launch, _)) = &launch {
                     unsafe {
@@ -1433,10 +1463,10 @@ impl Dock {
         }
         entries.push(menu::Entry::Separator);
         entries.push(menu::Entry::item(SETTINGS, "Dock ayarları…"));
-        let (x, top) = self.icon_anchor(i);
+        let (x, place) = self.icon_anchor(i);
         self.hold(1);
         let dock: &'static Dock = unsafe { &*(self as *const Dock) };
-        menu::show(entries, x, popup::Place::Above(top), move |id| match id {
+        menu::show(entries, x, place, move |id| match id {
             OPEN => unsafe {
                 ShellExecuteW(None, w!("open"), &HSTRING::from(source.as_str()), None, None, SW_SHOWNORMAL);
             },
@@ -1457,7 +1487,7 @@ impl Dock {
                     menu::Entry::item(2, "Vazgeç"),
                 ],
                 x,
-                popup::Place::Above(top),
+                place,
                 move |id| {
                     if id == 1 {
                         empty_trash();
@@ -1510,11 +1540,13 @@ impl Dock {
             after.dock_autohide,
             after.dock_indicators,
             after.dock_magnify,
+            after.dock_side,
         ) != (
             before.dock_icon,
             before.dock_autohide,
             before.dock_indicators,
             before.dock_magnify,
+            before.dock_side,
         );
         if !layout {
             return;
@@ -1522,7 +1554,11 @@ impl Dock {
         if after.dock_autohide != before.dock_autohide {
             self.sync_appbar();
         }
+        preview::hide();
         self.place();
+        if !self.shown.get() {
+            self.slide_to(true); // hidden docks slide out towards their new edge
+        }
         if after.dock_autohide && !before.dock_autohide {
             self.slide_out();
         } else if !after.dock_autohide && before.dock_autohide {
@@ -1544,7 +1580,11 @@ impl Dock {
 
 impl Handler for Dock {
     fn handle(&self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
-        let x = || (lp.0 & 0xFFFF) as i16 as i32;
+        // Pointer position along the dock (client px): x at the bottom, y at a side.
+        let x = || match self.side() {
+            DockSide::Bottom => (lp.0 & 0xFFFF) as i16 as i32,
+            _ => ((lp.0 >> 16) & 0xFFFF) as i16 as i32,
+        };
         match msg {
             WM_OPEN_SETTINGS => crate::prefs::open(),
             m if m == self.shellhook && m != 0 => self.on_shell(winlist::decode(wp.0, lp.0)),
@@ -1680,6 +1720,18 @@ unsafe extern "system" fn on_cloak(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn side_docks_keep_the_edge_side() {
+        // Window 100 px thick; a 20 px box touching the screen edge (c = 80).
+        assert_eq!(turn(DockSide::Bottom, 100.0, 30.0, 80.0, 20.0), (30.0, 80.0));
+        assert_eq!(turn(DockSide::Left, 100.0, 30.0, 80.0, 20.0), (0.0, 30.0), "left edge at x = 0");
+        assert_eq!(turn(DockSide::Right, 100.0, 30.0, 80.0, 20.0), (80.0, 30.0), "right edge at x = 100");
+        // The far side of the window points into the screen.
+        assert_eq!(turn(DockSide::Left, 100.0, 0.0, 0.0, 20.0), (80.0, 0.0));
+        assert_eq!(self_dims(DockSide::Left, 300.0, 100.0), (100.0, 300.0));
+        assert_eq!(self_dims(DockSide::Bottom, 300.0, 100.0), (300.0, 100.0));
+    }
 
     const G: Geometry = Geometry { icon: 48.0, sep: None };
 

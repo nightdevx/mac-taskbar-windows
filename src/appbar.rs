@@ -3,13 +3,15 @@
 
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::UI::Shell::{
-    ABE_BOTTOM, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA, SHAppBarMessage,
+    ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA, SHAppBarMessage,
 };
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Edge {
     Top,
     Bottom,
+    Left,
+    Right,
 }
 
 /// Strip `thickness` px thick along `edge` of `monitor`.
@@ -21,6 +23,14 @@ pub fn edge_rect(monitor: RECT, edge: Edge, thickness: i32) -> RECT {
         },
         Edge::Bottom => RECT {
             top: monitor.bottom - thickness,
+            ..monitor
+        },
+        Edge::Left => RECT {
+            right: monitor.left + thickness,
+            ..monitor
+        },
+        Edge::Right => RECT {
+            left: monitor.right - thickness,
             ..monitor
         },
     }
@@ -48,6 +58,8 @@ pub fn set_edge(hwnd: HWND, edge: Edge, monitor: RECT, thickness: i32) -> RECT {
     let abe = match edge {
         Edge::Top => ABE_TOP,
         Edge::Bottom => ABE_BOTTOM,
+        Edge::Left => ABE_LEFT,
+        Edge::Right => ABE_RIGHT,
     };
     let mut d = APPBARDATA {
         uEdge: abe,
@@ -59,6 +71,8 @@ pub fn set_edge(hwnd: HWND, edge: Edge, monitor: RECT, thickness: i32) -> RECT {
         match edge {
             Edge::Top => d.rc.bottom = d.rc.top + thickness,
             Edge::Bottom => d.rc.top = d.rc.bottom - thickness,
+            Edge::Left => d.rc.right = d.rc.left + thickness,
+            Edge::Right => d.rc.left = d.rc.right - thickness,
         }
         SHAppBarMessage(ABM_SETPOS, &mut d);
     }

@@ -126,7 +126,7 @@ struct Preview {
     /// Name bubble when the app has no windows.
     label: RefCell<Option<String>>,
     size: Cell<(f32, f32)>,
-    anchor: Cell<(i32, i32)>,
+    anchor: Cell<(i32, popup::Place)>,
     hover: Cell<Option<(usize, bool)>>,
     tracking: Cell<bool>,
 }
@@ -161,7 +161,7 @@ pub fn init(gfx: Rc<Gfx>, dock: HWND) -> Result<()> {
         cards: RefCell::new(Vec::new()),
         label: RefCell::new(None),
         size: Cell::new((0.0, 0.0)),
-        anchor: Cell::new((0, 0)),
+        anchor: Cell::new((0, popup::Place::Above(0))),
         hover: Cell::new(None),
         tracking: Cell::new(false),
     }));
@@ -172,7 +172,7 @@ pub fn init(gfx: Rc<Gfx>, dock: HWND) -> Result<()> {
 
 /// Shows previews of `windows`, or the name bubble when there are none,
 /// centred on `anchor_x` with the bottom at `anchor_bottom` (screen px).
-pub fn show(windows: &[HWND], name: &str, anchor_x: i32, anchor_bottom: i32) {
+pub fn show(windows: &[HWND], name: &str, anchor: i32, place: popup::Place) {
     let Some(p) = get() else { return };
     p.cancel_hide();
     p.release();
@@ -195,7 +195,7 @@ pub fn show(windows: &[HWND], name: &str, anchor_x: i32, anchor_bottom: i32) {
     }
     *p.label.borrow_mut() = shown.is_empty().then(|| name.to_string());
     *p.shown.borrow_mut() = shown;
-    p.anchor.set((anchor_x, anchor_bottom));
+    p.anchor.set((anchor, place));
     p.hover.set(None);
     p.relayout();
 }
@@ -286,8 +286,8 @@ impl Preview {
             }
         };
         self.size.set((w, h));
-        let (ax, ab) = self.anchor.get();
-        self.popup().show(ax, popup::Place::Above(ab), monitor, dpi, w, h, |dc| self.draw(dc));
+        let (anchor, place) = self.anchor.get();
+        self.popup().show(anchor, place, monitor, dpi, w, h, |dc| self.draw(dc));
         // Thumbnails are composited by DWM on top of our content.
         for (sh, card) in self.shown.borrow().iter().zip(self.cards.borrow().iter()) {
             let r = card.thumb;

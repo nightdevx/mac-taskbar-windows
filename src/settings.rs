@@ -29,6 +29,33 @@ pub struct Settings {
     pub battery_percent: bool,
     /// Start at sign-in (HKCU Run entry).
     pub autostart: bool,
+    pub dock_side: DockSide,
+}
+
+/// Screen edge the dock sits on (macOS: left, bottom, right).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockSide {
+    Left,
+    Bottom,
+    Right,
+}
+
+impl DockSide {
+    pub const ALL: [DockSide; 3] = [DockSide::Left, DockSide::Bottom, DockSide::Right];
+    fn key(self) -> &'static str {
+        match self {
+            DockSide::Left => "left",
+            DockSide::Bottom => "bottom",
+            DockSide::Right => "right",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            DockSide::Left => "Sol",
+            DockSide::Bottom => "Alt",
+            DockSide::Right => "Sağ",
+        }
+    }
 }
 
 impl Default for Settings {
@@ -43,6 +70,7 @@ impl Default for Settings {
             hidden_apps: Vec::new(),
             battery_percent: true,
             autostart: false,
+            dock_side: DockSide::Bottom,
         }
     }
 }
@@ -82,6 +110,11 @@ pub fn parse(text: &str) -> Settings {
             "dock_indicators" => s.dock_indicators = flag(value, s.dock_indicators),
             "battery_percent" => s.battery_percent = flag(value, s.battery_percent),
             "autostart" => s.autostart = flag(value, s.autostart),
+            "dock_position" => {
+                if let Some(side) = DockSide::ALL.into_iter().find(|d| d.key() == value) {
+                    s.dock_side = side;
+                }
+            }
             "pins" if value.is_empty() => s.pins = Some(Vec::new()),
             "pin" => s.pins.get_or_insert_with(Vec::new).push(value.to_string()),
             "folders" if value.is_empty() => s.folders = Some(Vec::new()),
@@ -95,8 +128,14 @@ pub fn parse(text: &str) -> Settings {
 
 pub fn format(s: &Settings) -> String {
     let mut out = format!(
-        "dock_icon = {}\ndock_autohide = {}\ndock_indicators = {}\ndock_magnify = {}\nbattery_percent = {}\nautostart = {}\n",
-        s.dock_icon, s.dock_autohide, s.dock_indicators, s.dock_magnify, s.battery_percent, s.autostart
+        "dock_icon = {}\ndock_autohide = {}\ndock_indicators = {}\ndock_magnify = {}\nbattery_percent = {}\nautostart = {}\ndock_position = {}\n",
+        s.dock_icon,
+        s.dock_autohide,
+        s.dock_indicators,
+        s.dock_magnify,
+        s.battery_percent,
+        s.autostart,
+        s.dock_side.key()
     );
     match &s.pins {
         Some(pins) if pins.is_empty() => out.push_str("pins =\n"),
@@ -233,6 +272,7 @@ mod tests {
             hidden_apps: vec!["Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into()],
             battery_percent: false,
             autostart: true,
+            dock_side: DockSide::Left,
         };
         assert_eq!(parse(&format(&s)), s);
         let empty = Settings {

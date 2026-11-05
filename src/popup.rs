@@ -28,6 +28,20 @@ pub enum Place {
     Above(i32),
     /// Top edge at this y (menu bar panels).
     Below(i32),
+    /// Left edge at this x, centred on the anchor y (left dock).
+    RightOf(i32),
+    /// Right edge at this x, centred on the anchor y (right dock).
+    LeftOf(i32),
+}
+
+impl Place {
+    /// A screen point on the anchor, for picking the monitor.
+    pub fn point(self, anchor: i32) -> (i32, i32) {
+        match self {
+            Place::Above(y) | Place::Below(y) => (anchor, y),
+            Place::RightOf(x) | Place::LeftOf(x) => (x, anchor),
+        }
+    }
 }
 const APPEAR_MS: i64 = 120;
 
@@ -113,8 +127,8 @@ impl Popup {
         self.scale.get()
     }
 
-    /// Shows a `w` x `h` DIP popup centred on `anchor_x`, above or below
-    /// `place`, kept inside `monitor`.
+    /// Shows a `w` x `h` DIP popup centred on `anchor_x` (on the anchor y for
+    /// `RightOf`/`LeftOf`), on the `place` side, kept inside `monitor`.
     pub fn show(
         &self,
         anchor_x: i32,
@@ -127,15 +141,22 @@ impl Popup {
     ) {
         let s = theme::scale(dpi);
         let (wp, hp) = ((w * s).round() as i32, (h * s).round() as i32);
-        let x = (anchor_x - wp / 2).clamp(
+        let centred_x = (anchor_x - wp / 2).clamp(
             monitor.left + 4,
             (monitor.right - wp - 4).max(monitor.left + 4),
         );
-        let y = match place {
-            Place::Above(bottom) => (bottom - hp).max(monitor.top + 4),
-            Place::Below(top) => top.min(monitor.bottom - hp - 4),
+        let centred_y = (anchor_x - hp / 2).clamp(monitor.top + 4, (monitor.bottom - hp - 4).max(monitor.top + 4));
+        let (x, y) = match place {
+            Place::Above(bottom) => (centred_x, (bottom - hp).max(monitor.top + 4)),
+            Place::Below(top) => (centred_x, top.min(monitor.bottom - hp - 4)),
+            Place::RightOf(left) => (left.min(monitor.right - wp - 4), centred_y),
+            Place::LeftOf(right) => ((right - wp).max(monitor.left + 4), centred_y),
         };
-        let pivot = if matches!(place, Place::Below(_)) { 0 } else { hp };
+        let pivot = match place {
+            Place::Below(_) => 0,
+            Place::Above(_) => hp,
+            Place::RightOf(_) | Place::LeftOf(_) => hp / 2,
+        };
         self.show_rect(RECT { left: x, top: y, right: x + wp, bottom: y + hp }, dpi, RADIUS, pivot, draw);
     }
 

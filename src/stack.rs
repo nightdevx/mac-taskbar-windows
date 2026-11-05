@@ -128,8 +128,8 @@ pub fn init(gfx: Rc<Gfx>) -> Result<()> {
     Ok(())
 }
 
-/// Opens the grid for `folder` above `anchor_x`/`anchor_bottom` (screen px).
-pub fn show(folder: &str, anchor_x: i32, anchor_bottom: i32) {
+/// Opens the grid for `folder` next to the dock icon at `anchor` (screen px).
+pub fn show(folder: &str, anchor: i32, place: Place) {
     let Some(s) = STACK.with(|c| c.get().copied()) else { return };
     let (monitor, dpi) = window::primary_monitor();
     let px = (ICON * theme::scale(dpi)).round() as u32;
@@ -140,7 +140,7 @@ pub fn show(folder: &str, anchor_x: i32, anchor_bottom: i32) {
     *s.folder.borrow_mut() = PathBuf::from(folder);
     s.hover.set(None);
     let (w, h) = size(s.entries.borrow().len());
-    s.popup().show(anchor_x, Place::Above(anchor_bottom), monitor, dpi, w, h, |dc| s.draw(dc));
+    s.popup().show(anchor, place, monitor, dpi, w, h, |dc| s.draw(dc));
 }
 
 impl Stack {

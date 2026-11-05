@@ -26,7 +26,7 @@ use windows_numerics::Vector2;
 
 use crate::gfx::{self, Gfx, Label};
 use crate::log;
-use crate::settings::{self, DOCK_ICON_MAX, DOCK_ICON_MIN, MAGNIFY_MAX, Settings};
+use crate::settings::{self, DOCK_ICON_MAX, DOCK_ICON_MIN, DockSide, MAGNIFY_MAX, Settings};
 use crate::theme::{self, Rgba};
 use crate::window::{self, Handler};
 
@@ -56,6 +56,8 @@ const LIGHT_X: [f32; 3] = [20.0, 40.0, 60.0];
 pub enum Control {
     Size,
     Magnify,
+    /// Screen edge: Left / Bottom / Right segments.
+    Position,
     AutoHide,
     Indicators,
     /// Pin a folder right of the dock separator.
@@ -65,9 +67,10 @@ pub enum Control {
 }
 
 /// Keyboard focus order, also the order rows are laid out in.
-pub const CONTROLS: [Control; 7] = [
+pub const CONTROLS: [Control; 8] = [
     Control::Size,
     Control::Magnify,
+    Control::Position,
     Control::AutoHide,
     Control::Indicators,
     Control::AddFolder,
@@ -81,6 +84,7 @@ impl Control {
         match self {
             Control::Size => "Boyut",
             Control::Magnify => "Büyütme",
+            Control::Position => "Ekrandaki konumu",
             Control::AutoHide => "Dock'u otomatik olarak gizle ve göster",
             Control::Indicators => "Açık uygulamalar için göstergeleri göster",
             Control::AddFolder => "Dock'taki klasörler",
@@ -123,7 +127,7 @@ impl Control {
     }
     fn is_on(self, s: &Settings) -> bool {
         match self {
-            Control::Size | Control::Magnify | Control::AddFolder => false,
+            Control::Size | Control::Magnify | Control::AddFolder | Control::Position => false,
             Control::AutoHide => s.dock_autohide,
             Control::Indicators => s.dock_indicators,
             Control::BatteryPercent => s.battery_percent,
@@ -133,12 +137,33 @@ impl Control {
     fn toggle(self, s: &mut Settings) {
         match self {
             Control::Size | Control::Magnify | Control::AddFolder => {}
+            Control::Position => s.dock_side = step_side(s.dock_side, true),
             Control::AutoHide => s.dock_autohide ^= true,
             Control::Indicators => s.dock_indicators ^= true,
             Control::BatteryPercent => s.battery_percent ^= true,
             Control::Autostart => s.autostart ^= true,
         }
     }
+}
+
+/// Next (or previous) dock side in Left, Bottom, Right order, wrapping.
+pub fn step_side(side: DockSide, forward: bool) -> DockSide {
+    let all = DockSide::ALL;
+    let i = all.iter().position(|d| *d == side).unwrap_or(1);
+    all[(i + if forward { 1 } else { all.len() - 1 }) % all.len()]
+}
+
+const SEG_W: f32 = 64.0;
+const SEG_H: f32 = 24.0;
+
+/// The three position segments of a row, right-aligned like a macOS segmented control.
+pub fn segments(row: &D2D_RECT_F) -> [(DockSide, D2D_RECT_F); 3] {
+    let mid = (row.top + row.bottom) / 2.0;
+    let left = row.right - INNER - 3.0 * SEG_W;
+    DockSide::ALL.map(|d| {
+        let i = DockSide::ALL.iter().position(|x| *x == d).unwrap_or(0) as f32;
+        (d, rect(left + i * SEG_W, mid - SEG_H / 2.0, left + (i + 1.0) * SEG_W, mid + SEG_H / 2.0))
+    })
 }
 
 fn rect(l: f32, t: f32, r: f32, b: f32) -> D2D_RECT_F {
@@ -215,6 +240,8 @@ pub enum Target {
     Control(Control),
     /// On a slider: drag starts here.
     Slider(Control),
+    /// A dock position segment.
+    Side(DockSide),
 }
 
 pub fn hit(l: &Layout, x: f32, y: f32) -> Option<Target> {
@@ -228,6 +255,9 @@ pub fn hit(l: &Layout, x: f32, y: f32) -> Option<Target> {
         }
     }
     let (c, row) = l.rows.iter().find(|(_, r)| inside(r, x, y))?;
+    if *c == Control::Position {
+        return segments(row).into_iter().find(|(_, r)| inside(r, x, y)).map(|(d, _)| Target::Side(d));
+    }
     if c.is_slider() {
         let t = track_rect(row);
         let grab = KNOB / 2.0 + 2.0;
@@ -414,6 +444,29 @@ pub fn draw(
                     dc.FillEllipse(&ellipse(kx, ky, KNOB / 2.0), &brush(p.knob)?);
                     if focused {
                         dc.DrawEllipse(&ellipse(kx, ky, KNOB / 2.0 + 3.0), &accent, 2.0, None);
+                    }
+                }
+                Control::Position => {
+                    let segs = segments(row);
+                    let whole = rect(segs[0].1.left, segs[0].1.top, segs[2].1.right, segs[0].1.bottom);
+                    dc.FillRoundedRectangle(&rounded(whole, 7.0), &brush(p.track)?);
+                    for (d, r) in segs {
+                        let on = d == v.settings.dock_side;
+                        if on {
+                            let pill = rect(r.left + 2.0, r.top + 2.0, r.right - 2.0, r.bottom - 2.0);
+                            dc.FillRoundedRectangle(&rounded(pill, 5.0), &brush(p.shadow)?);
+                            // macOS: white pill in light mode, lifted grey in dark mode.
+                            let dark = p.text.0 > 128;
+                            let fill = if dark { Rgba(99, 99, 102, 255) } else { p.knob };
+                            dc.FillRoundedRectangle(&rounded(rect(pill.left, pill.top, pill.right, pill.bottom - 0.5), 5.0), &brush(fill)?);
+                        }
+                        let l = Label::new(dwrite, d.label(), &fonts.small)?;
+                        let b = brush(if on { p.text } else { p.secondary })?;
+                        l.draw_text(dc, (r.left + r.right - l.width) / 2.0, r.top + r.bottom, fonts.cap * 11.0 / 13.0, &b);
+                    }
+                    if focused {
+                        let ring = rect(whole.left - 3.0, whole.top - 3.0, whole.right + 3.0, whole.bottom + 3.0);
+                        dc.DrawRoundedRectangle(&rounded(ring, 9.0), &accent, 2.0, None);
                     }
                 }
                 Control::AddFolder => {
@@ -701,6 +754,10 @@ impl Prefs {
                     });
                 }
             }
+            Target::Side(d) => {
+                Self::hold_dock(2);
+                settings::update(|s| s.dock_side = d);
+            }
             Target::Control(c) => {
                 Self::hold_dock(2);
                 settings::update(|s| c.toggle(s));
@@ -739,6 +796,10 @@ impl Prefs {
             k if [VK_LEFT.0, VK_DOWN.0, VK_RIGHT.0, VK_UP.0].contains(&k) => match self.focus.get()
             {
                 Some(c) if c.is_slider() => self.step_slider(c, k == VK_RIGHT.0 || k == VK_UP.0),
+                Some(Control::Position) => {
+                    let side = step_side(settings::get().dock_side, k == VK_RIGHT.0 || k == VK_DOWN.0);
+                    self.activate(Target::Side(side));
+                }
                 _ => return false,
             },
             _ => return false,
@@ -887,5 +948,21 @@ mod tests {
             (slider_value(Control::Magnify, &t, 153.0) - 1.55).abs() < 1e-4,
             "0.05 steps"
         );
+    }
+
+    #[test]
+    fn position_steps_wrap() {
+        use crate::settings::DockSide::*;
+        assert_eq!(step_side(Bottom, true), Right);
+        assert_eq!(step_side(Right, true), Left);
+        assert_eq!(step_side(Left, false), Right);
+        let row = rect(0.0, 0.0, 500.0, 40.0);
+        let l = layout_for_test(row);
+        assert_eq!(hit(&l, segments(&row)[0].1.left + 5.0, 20.0), Some(Target::Side(Left)));
+        assert_eq!(hit(&l, segments(&row)[2].1.right - 5.0, 20.0), Some(Target::Side(Right)));
+    }
+
+    fn layout_for_test(row: D2D_RECT_F) -> Layout {
+        Layout { groups: Vec::new(), rows: vec![(Control::Position, row)], height: 40.0 }
     }
 }

@@ -252,10 +252,8 @@ pub fn show(
     *m.entries.borrow_mut() = entries;
     *m.pick.borrow_mut() = Some(Box::new(on_pick));
     m.hover.set(None);
-    let anchor_y = match place {
-        crate::popup::Place::Above(y) | crate::popup::Place::Below(y) => y,
-    };
-    let (monitor, dpi) = window::monitor_at(anchor_x, anchor_y);
+    let (px, py) = place.point(anchor_x);
+    let (monitor, dpi) = window::monitor_at(px, py);
     if let Some(p) = m.popup.get() {
         p.show(
             anchor_x,
