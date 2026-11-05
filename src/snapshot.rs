@@ -162,6 +162,7 @@ pub fn run(path: &str) -> Result<()> {
                 app_name: app.into(),
                 clock: clock::text(&clock::now()),
                 status: status::icons(&st, true),
+                tray: sample_tray(),
                 palette,
             };
             menubar::draw(dc, &dwrite, &fonts, &st, WIDTH, bar_h)?;
@@ -508,4 +509,14 @@ fn render_png(
         frame.Commit()?;
         encoder.Commit()
     }
+}
+
+/// Two app icons standing in for tray icons (the live tray is never read here).
+fn sample_tray() -> Vec<crate::tray::Entry> {
+    let px = (crate::tray::ICON_DIP * SCALE).round() as u32;
+    [r"C:\Windows\explorer.exe", r"C:\Windows\System32\notepad.exe"]
+        .iter()
+        .map(|exe| crate::tray::Entry { pixels: crate::icons::load(exe, px).pixels, ..Default::default() })
+        .filter(|e| !e.pixels.is_empty())
+        .collect()
 }

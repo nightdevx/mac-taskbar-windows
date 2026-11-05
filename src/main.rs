@@ -25,6 +25,7 @@ mod stack;
 mod status;
 mod theme;
 mod touchpad;
+mod tray;
 mod wifi;
 mod window;
 mod winlist;
@@ -118,6 +119,7 @@ fn run(hidden: bool, open_settings: bool) -> Result<()> {
     if !hidden {
         shelltray::hide();
         unsafe { SetUnhandledExceptionFilter(Some(on_crash)) };
+        tray::start(unsafe { FindWindowW(menubar::CLASS, None) }.unwrap_or_default());
     }
     log::info(&format!(
         "started in {} ms (hidden: {hidden})",

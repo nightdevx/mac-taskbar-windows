@@ -26,6 +26,8 @@ pub const CLASS: PCWSTR = w!("TaskbarMenuBar");
 const CLASS_OTHER: PCWSTR = w!("TaskbarMenuBarOther");
 const WM_APPBAR: u32 = WM_APP + 1;
 const WM_FOREGROUND: u32 = WM_APP + 2;
+/// Tray icons changed (`tray.rs`).
+pub const WM_TRAY: u32 = WM_APP + 20;
 const TIMER_CLOCK: usize = 1;
 
 thread_local! {
@@ -89,6 +91,8 @@ pub struct State {
     pub clock: String,
     /// Status icons, drawn right to left before the clock.
     pub status: Vec<Icon>,
+    /// Notification area icons, left of the status icons (macOS menu extras).
+    pub tray: Vec<crate::tray::Entry>,
     pub palette: Palette,
 }
 
@@ -127,6 +131,8 @@ pub enum Hit {
     Logo,
     Clock,
     Status(status::Kind),
+    /// Index into `State::tray`.
+    Tray(usize),
 }
 
 /// Horizontal extent of a clickable part (DIPs).
@@ -200,6 +206,38 @@ pub fn draw(
         gap = theme::MENUBAR_GAP;
     }
 
+    let px_props = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: windows::Win32::Graphics::Direct2D::Common::D2D1_PIXEL_FORMAT {
+            format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: windows::Win32::Graphics::Direct2D::Common::D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        ..Default::default()
+    };
+    let size = crate::tray::ICON_DIP;
+    for (i, icon) in st.tray.iter().enumerate() {
+        let side = ((icon.pixels.len() / 4) as f64).sqrt() as u32;
+        let x = edge - gap - size;
+        if x - theme::MENUBAR_GAP < name_floor || side == 0 {
+            break; // ponytail: icons that do not fit are dropped; an overflow menu if people miss them
+        }
+        let y = ((h - size) / 2.0).round();
+        unsafe {
+            let bmp = dc.CreateBitmap(
+                windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U { width: side, height: side },
+                Some(icon.pixels.as_ptr() as *const _),
+                side * 4,
+                &px_props,
+            )?;
+            let r = D2D_RECT_F { left: x, top: y, right: x + size, bottom: y + size };
+            dc.DrawBitmap(&bmp, Some(&r), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+        }
+        zones.push(Zone { hit: Hit::Tray(i), left: x - gap / 2.0, right: edge - gap / 2.0 });
+        edge = x;
+        gap = theme::MENUBAR_GAP;
+    }
+
     if !st.app_name.is_empty() {
         let max = edge - theme::MENUBAR_GAP - left;
         Label::fitted(dwrite, &st.app_name, &fonts.bold, max)?
@@ -251,6 +289,7 @@ impl MenuBar {
                 app_name: String::new(),
                 clock: String::new(),
                 status: Vec::new(),
+                tray: Vec::new(),
                 palette,
             }),
             comp: RefCell::new(None),
@@ -519,8 +558,20 @@ impl MenuBar {
             Hit::Status(status::Kind::Battery) => panels::Kind::Battery,
             Hit::Status(status::Kind::Volume) => panels::Kind::Volume,
             Hit::Status(status::Kind::Control) => panels::Kind::Control,
+            Hit::Tray(i) => return crate::tray::click(i, false, centre, rc.bottom),
         };
         panels::toggle(kind, centre, below);
+    }
+
+    /// Tray icon under `x_px` (client px): its index, centre x and the bar's bottom (screen px).
+    fn tray_at(&self, x_px: i32) -> Option<(usize, i32, i32)> {
+        let s = theme::scale(self.dpi.get());
+        let x = x_px as f32 / s;
+        let zone = self.zones.borrow().iter().find(|z| x >= z.left && x < z.right).copied()?;
+        let Hit::Tray(i) = zone.hit else { return None };
+        let mut rc = RECT::default();
+        unsafe { _ = GetWindowRect(self.hwnd.get(), &mut rc) };
+        Some((i, rc.left + (((zone.left + zone.right) / 2.0) * s).round() as i32, rc.bottom))
     }
 
     /// Right click on the bar: the settings people look for there.
@@ -628,7 +679,17 @@ impl Handler for MenuBar {
         match msg {
             WM_TIMER if wp.0 == TIMER_CLOCK => self.refresh_clock(),
             WM_LBUTTONUP => self.click((lp.0 & 0xFFFF) as i16 as i32),
-            WM_RBUTTONUP => self.bar_menu(),
+            WM_RBUTTONUP => {
+                if let Some((i, centre, bottom)) = self.tray_at((lp.0 & 0xFFFF) as i16 as i32) {
+                    crate::tray::click(i, true, centre, bottom);
+                } else {
+                    self.bar_menu();
+                }
+            }
+            WM_TRAY => {
+                self.state.borrow_mut().tray = crate::tray::icons();
+                self.redraw();
+            }
             WM_TIMECHANGE => self.refresh_clock(),
             WM_FOREGROUND => self.set_app(HWND(wp.0 as *mut _)),
             status::WM_STATUS => self.refresh_status(wp.0),
