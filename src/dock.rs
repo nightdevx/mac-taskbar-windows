@@ -37,6 +37,8 @@ const WM_APPBAR: u32 = WM_APP + 1;
 const WM_ICON: u32 = WM_APP + 4;
 /// A window's cloaked state changed (Store apps, virtual desktops): re-check it.
 const WM_RECHECK: u32 = WM_APP + 5;
+/// `--settings` from a second launch asks the running instance to open settings.
+pub const WM_OPEN_SETTINGS: u32 = WM_APP + 6;
 /// Lives in UI::Controls in windows-rs; not worth the feature for one constant.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_HIDE: usize = 1;
@@ -145,7 +147,7 @@ pub fn entries(settings: &Settings) -> Vec<Entry> {
         .into_iter()
         .filter_map(|p| Some(Entry { identity: appid::source_identity(&p)?, pin: Some(p.clone()), windows: Vec::new(), source: p }))
         .collect();
-    for hwnd in winlist::enumerate().into_iter().rev() {
+    for hwnd in winlist::enumerate().into_iter().rev().filter(|h| !winlist::is_own(*h)) {
         let Some(identity) = appid::window_identity(hwnd) else { continue };
         match out.iter_mut().find(|e| e.identity.same_app(&identity)) {
             Some(e) => e.windows.push(hwnd),
@@ -180,7 +182,6 @@ pub struct Dock {
     /// Window size in px.
     size: Cell<(i32, i32)>,
     palette: Cell<Palette>,
-    settings: RefCell<Settings>,
     /// Auto-hide: whether the dock is currently out.
     shown: Cell<bool>,
     tracking: Cell<bool>,
@@ -205,7 +206,6 @@ impl Dock {
             strip: Cell::new(RECT::default()),
             size: Cell::new((0, 0)),
             palette: Cell::new(theme::system_palette()),
-            settings: RefCell::new(settings::load()),
             shown: Cell::new(true),
             tracking: Cell::new(false),
             registered: Cell::new(false),
@@ -226,7 +226,7 @@ impl Dock {
         dock.sync_appbar();
         dock.place();
 
-        let entries = entries(&dock.settings.borrow());
+        let entries = entries(&settings::get());
         for e in entries {
             if let Some(i) = dock.add_item(e.identity, e.pin, e.source) {
                 dock.items.borrow_mut()[i].windows = e.windows;
@@ -252,11 +252,11 @@ impl Dock {
     }
 
     fn geometry(&self) -> Geometry {
-        Geometry { icon: self.settings.borrow().dock_icon }
+        Geometry { icon: settings::get().dock_icon }
     }
 
     fn autohide(&self) -> bool {
-        self.settings.borrow().dock_autohide
+        settings::get().dock_autohide
     }
 
     fn init_visuals(&self) -> Result<()> {
@@ -357,6 +357,7 @@ impl Dock {
         _ = c.shape.SetCornerRadius(Vector2 { X: g.radius() * s, Y: g.radius() * s });
         let icon = (g.icon * s).round();
         let dot = theme::DOCK_DOT * s;
+        let indicators = settings::get().dock_indicators;
         for (i, item) in items.iter().enumerate() {
             let left = (g.item_x(i) * s).round();
             _ = item.icon.SetOffset(Vector3 { X: left, Y: (g.pad() * s).round(), Z: 0.0 });
@@ -364,7 +365,7 @@ impl Dock {
             let dot_y = (g.pad() + g.icon + (g.pad_bottom() - theme::DOCK_DOT) / 2.0) * s;
             _ = item.dot.SetOffset(Vector3 { X: (left + (icon - dot) / 2.0).round(), Y: dot_y.round(), Z: 0.0 });
             _ = item.dot.SetSize(Vector2 { X: dot, Y: dot });
-            _ = item.dot.SetIsVisible(!item.windows.is_empty());
+            _ = item.dot.SetIsVisible(indicators && !item.windows.is_empty());
         }
         drop(comp);
         drop(items);
@@ -477,8 +478,7 @@ impl Dock {
         if self.requested.borrow_mut().insert(source.to_string())
             && let Some(loader) = self.loader.borrow().as_ref()
         {
-            let largest = settings::DOCK_SIZES[settings::DOCK_SIZES.len() - 1];
-            loader.request(source, (largest * theme::DOCK_MAGNIFY * self.scale()).round() as u32);
+            loader.request(source, (settings::DOCK_ICON_MAX * theme::DOCK_MAGNIFY * self.scale()).round() as u32);
         }
     }
 
@@ -519,7 +519,7 @@ impl Dock {
     }
 
     fn add_window(&self, hwnd: HWND) {
-        if self.tracks(hwnd) || !winlist::qualifies(hwnd) {
+        if self.tracks(hwnd) || !winlist::qualifies(hwnd) || winlist::is_own(hwnd) {
             return;
         }
         let Some(identity) = appid::window_identity(hwnd) else { return };
@@ -604,15 +604,14 @@ impl Dock {
     fn context_menu(&self, x_px: i32) {
         const KEEP: usize = 1;
         const CLOSE: usize = 2;
-        const SIZE: usize = 10;
-        const AUTOHIDE: usize = 20;
+        const AUTOHIDE: usize = 3;
+        const SETTINGS: usize = 4;
         let index = self.item_at(x_px);
         let (pinned, windows) = index.map_or((false, Vec::new()), |i| {
             let items = self.items.borrow();
             (items[i].pin.is_some(), items[i].windows.clone())
         });
-        let current = self.settings.borrow().clone();
-        let check = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
+        let autohide = self.autohide();
 
         let chosen = unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
@@ -623,14 +622,9 @@ impl Dock {
                 }
                 _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             }
-            if let Ok(sizes) = CreatePopupMenu() {
-                let names = [w!("Çok küçük"), w!("Küçük"), w!("Orta"), w!("Büyük"), w!("Çok büyük")];
-                for (i, (size, name)) in settings::DOCK_SIZES.iter().zip(names).enumerate() {
-                    _ = AppendMenuW(sizes, MF_STRING | check(*size == current.dock_icon), SIZE + i, name);
-                }
-                _ = AppendMenuW(menu, MF_POPUP, sizes.0 as usize, w!("Simge boyutu"));
-            }
-            _ = AppendMenuW(menu, MF_STRING | check(current.dock_autohide), AUTOHIDE, w!("Otomatik gizle"));
+            // macOS wording: the menu names the action, settings hold the rest.
+            _ = AppendMenuW(menu, MF_STRING, AUTOHIDE, if autohide { w!("Gizlemeyi kapat") } else { w!("Gizlemeyi aç") });
+            _ = AppendMenuW(menu, MF_STRING, SETTINGS, w!("Dock ayarları…"));
 
             let mut pt = POINT::default();
             _ = GetCursorPos(&mut pt);
@@ -648,8 +642,8 @@ impl Dock {
                 }
             }
             CLOSE => windows.iter().for_each(|w| unsafe { _ = PostMessageW(Some(*w), WM_CLOSE, WPARAM(0), LPARAM(0)) }),
-            s if (SIZE..SIZE + settings::DOCK_SIZES.len()).contains(&s) => self.update(|st| st.dock_icon = settings::DOCK_SIZES[s - SIZE]),
-            AUTOHIDE => self.update(|st| st.dock_autohide = !st.dock_autohide),
+            AUTOHIDE => settings::update(|st| st.dock_autohide = !st.dock_autohide),
+            SETTINGS => crate::prefs::open(),
             _ => {}
         }
         // The menu swallowed the mouse-leave; hide again if the pointer went elsewhere.
@@ -685,15 +679,15 @@ impl Dock {
             None => self.items.borrow_mut()[index].pin = Some(source),
         }
         let pins: Vec<String> = self.items.borrow().iter().filter_map(|i| i.pin.clone()).collect();
-        self.update(|st| st.pins = Some(pins));
+        settings::update(|st| st.pins = Some(pins));
     }
 
-    /// Applies a settings change, saves it and lays the dock out again.
-    fn update(&self, change: impl FnOnce(&mut Settings)) {
-        let before = self.settings.borrow().clone();
-        change(&mut self.settings.borrow_mut());
-        let after = self.settings.borrow().clone();
-        settings::save(&after);
+    /// Follows a settings change (from the menu or the settings window).
+    pub fn apply(&self, before: &Settings, after: &Settings) {
+        let layout = (after.dock_icon, after.dock_autohide, after.dock_indicators) != (before.dock_icon, before.dock_autohide, before.dock_indicators);
+        if !layout {
+            return;
+        }
         if after.dock_autohide != before.dock_autohide {
             self.sync_appbar();
         }
@@ -721,6 +715,7 @@ impl Handler for Dock {
     fn handle(&self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         let x = || (lp.0 & 0xFFFF) as i16 as i32;
         match msg {
+            WM_OPEN_SETTINGS => crate::prefs::open(),
             m if m == self.shellhook && m != 0 => self.on_shell(winlist::decode(wp.0, lp.0)),
             WM_ICON => self.on_icon(unsafe { icons::take(lp) }),
             WM_RECHECK => self.recheck(HWND(wp.0 as *mut _)),

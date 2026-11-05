@@ -40,6 +40,13 @@ pub fn info(hwnd: HWND) -> WinInfo {
     }
 }
 
+/// Our own windows (the settings window) never get a dock entry.
+pub fn is_own(hwnd: HWND) -> bool {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    pid == std::process::id()
+}
+
 pub fn qualifies(hwnd: HWND) -> bool {
     is_taskbar_window(&info(hwnd))
 }

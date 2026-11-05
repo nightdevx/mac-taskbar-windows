@@ -86,6 +86,30 @@ pub fn system_palette() -> Palette {
     if personalize_flag(w!("SystemUsesLightTheme")) == Some(true) { LIGHT } else { DARK }
 }
 
+/// App windows (our settings window) follow `AppsUseLightTheme`.
+pub fn apps_light() -> bool {
+    personalize_flag(w!("AppsUseLightTheme")) != Some(false)
+}
+
+/// The user's Windows accent colour (macOS uses its accent the same way).
+pub fn accent() -> Rgba {
+    let mut abgr = 0u32;
+    let mut size = 4u32;
+    let ok = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\DWM"),
+            w!("AccentColor"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut abgr as *mut u32 as *mut _),
+            Some(&mut size),
+        )
+        .is_ok()
+    };
+    if ok { Rgba(abgr as u8, (abgr >> 8) as u8, (abgr >> 16) as u8, 255) } else { Rgba(0, 120, 212, 255) }
+}
+
 /// Settings > Personalisation > Colours > Transparency effects. Missing value means on.
 pub fn transparency() -> bool {
     personalize_flag(w!("EnableTransparency")) != Some(false)

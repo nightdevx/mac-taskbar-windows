@@ -37,6 +37,10 @@ unsafe extern "system" fn wndproc<T: Handler + 'static>(hwnd: HWND, msg: u32, wp
 /// Topmost, never-activated popup without a taskbar entry, drawn only through
 /// composition. Messages go to `handler`, which lives for the whole process.
 pub fn create<T: Handler + 'static>(class: PCWSTR, handler: &'static T) -> Result<HWND> {
+    create_with(class, WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP, WS_POPUP, handler)
+}
+
+pub fn create_with<T: Handler + 'static>(class: PCWSTR, ex_style: WINDOW_EX_STYLE, style: WINDOW_STYLE, handler: &'static T) -> Result<HWND> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
         let wc = WNDCLASSEXW {
@@ -49,10 +53,10 @@ pub fn create<T: Handler + 'static>(class: PCWSTR, handler: &'static T) -> Resul
         };
         RegisterClassExW(&wc);
         CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+            ex_style,
             class,
             class,
-            WS_POPUP,
+            style,
             0,
             0,
             0,

@@ -8,6 +8,7 @@ mod gfx;
 mod icons;
 mod log;
 mod menubar;
+mod prefs;
 mod settings;
 mod shelltray;
 mod snapshot;
@@ -42,7 +43,7 @@ fn main() {
         quit_running();
         Ok(())
     } else {
-        run(flag("--hidden"))
+        run(flag("--hidden"), flag("--settings"))
     };
     if let Err(e) = result {
         log::error(&format!("fatal: {e}"));
@@ -50,10 +51,13 @@ fn main() {
     }
 }
 
-fn run(hidden: bool) -> Result<()> {
+fn run(hidden: bool, open_settings: bool) -> Result<()> {
     let started = Instant::now();
     let _single = unsafe { CreateMutexW(None, true, w!(r"Local\nightdijital.taskbar"))? };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        if open_settings && let Ok(dock) = unsafe { FindWindowW(dock::CLASS, None) } {
+            unsafe { _ = PostMessageW(Some(dock), dock::WM_OPEN_SETTINGS, WPARAM(0), LPARAM(0)) };
+        }
         log::info("already running, exiting");
         return Ok(());
     }
@@ -71,8 +75,17 @@ fn run(hidden: bool) -> Result<()> {
     };
 
     let gfx = Rc::new(gfx::Gfx::new()?);
-    menubar::MenuBar::create(gfx.clone(), hidden)?;
-    dock::Dock::create(gfx, hidden)?;
+    let bar = menubar::MenuBar::create(gfx.clone(), hidden)?;
+    let dock = dock::Dock::create(gfx.clone(), hidden)?;
+    prefs::init(gfx)?;
+    settings::listen(move |before, after| {
+        dock.apply(before, after);
+        bar.apply(before, after);
+        prefs::refresh();
+    });
+    if open_settings {
+        prefs::open();
+    }
     if !hidden {
         shelltray::hide();
         unsafe { SetUnhandledExceptionFilter(Some(on_crash)) };

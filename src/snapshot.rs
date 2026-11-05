@@ -12,7 +12,7 @@ use windows_numerics::Matrix3x2;
 
 use crate::menubar::{self, Fonts, State};
 use crate::theme::{self, Rgba};
-use crate::{clock, dock, gfx, icons, status};
+use crate::{clock, dock, gfx, icons, prefs, status};
 
 const SCALE: f32 = 1.5;
 const WIDTH: f32 = 1280.0;
@@ -21,6 +21,7 @@ const WALLPAPER: Rgba = Rgba(96, 112, 138, 255);
 pub fn run(path: &str) -> Result<()> {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
     let dwrite = gfx::dwrite()?;
+    prefs_png(&path.replace(".png", "-prefs.png"), &dwrite)?;
     let fonts = Fonts::new(&dwrite)?;
     let bar_h = theme::MENUBAR_HEIGHT;
     let gap = 12.0;
@@ -38,8 +39,8 @@ pub fn run(path: &str) -> Result<()> {
     };
     let long = "Microsoft Visual Studio Code - Insiders Edition, a name long enough to be cut off before the icons. ".repeat(3);
     // Live entries; drawn at the default size (dark) and the largest size (light).
-    let sizes = [crate::settings::Settings::default().dock_icon, crate::settings::DOCK_SIZES[4]];
-    let dock_items: Vec<(icons::Icon, bool)> = dock::entries(&crate::settings::load())
+    let sizes = [crate::settings::Settings::default().dock_icon, crate::settings::DOCK_ICON_MAX];
+    let dock_items: Vec<(icons::Icon, bool)> = dock::entries(&crate::settings::get())
         .iter()
         .map(|e| (icons::load(&e.source, (sizes[1] * SCALE).round() as u32), !e.windows.is_empty()))
         .collect();
@@ -62,7 +63,7 @@ pub fn run(path: &str) -> Result<()> {
             dc.SetTransform(&Matrix3x2::translation(0.0, y));
             let fill = dc.CreateSolidColorBrush(&palette.bar.d2d(), None)?;
             dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: WIDTH, bottom: bar_h }, &fill);
-            let st = State { app_name: app.into(), clock: clock::text(&clock::now()), status: status::icons(&st), palette };
+            let st = State { app_name: app.into(), clock: clock::text(&clock::now()), status: status::icons(&st, true), palette };
             menubar::draw(dc, &dwrite, &fonts, &st, WIDTH, bar_h)?;
         }
         let mut y = dock_top + gap;
@@ -71,6 +72,28 @@ pub fn run(path: &str) -> Result<()> {
             dc.SetTransform(&Matrix3x2::translation(((WIDTH - w) / 2.0).round(), y));
             draw_dock(dc, g, &dock_items, palette)?;
             y += g.height() + 2.0 * gap;
+        }
+        Ok(())
+    })
+}
+
+/// Settings window in light and dark, side by side, with the size slider focused.
+fn prefs_png(path: &str, dwrite: &windows::Win32::Graphics::DirectWrite::IDWriteFactory) -> Result<()> {
+    let fonts = prefs::Fonts::new(dwrite)?;
+    let l = prefs::layout();
+    let gap = 24.0;
+    render_png(path, 2.0 * prefs::WIDTH + 3.0 * gap, l.height + 2.0 * gap, |dc| unsafe {
+        let wall = dc.CreateSolidColorBrush(&WALLPAPER.d2d(), None)?;
+        dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: 2.0 * prefs::WIDTH + 3.0 * gap, bottom: l.height + 2.0 * gap }, &wall);
+        for (i, dark) in [false, true].into_iter().enumerate() {
+            let x = gap + i as f32 * (prefs::WIDTH + gap);
+            dc.SetTransform(&Matrix3x2::translation(x, gap));
+            let clip = D2D_RECT_F { left: 0.0, top: 0.0, right: prefs::WIDTH, bottom: l.height };
+            dc.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            let view = prefs::View { settings: crate::settings::Settings::default(), focus: Some(prefs::CONTROLS[0]), active: !dark, palette: prefs::palette(dark) };
+            let r = prefs::draw(dc, dwrite, &fonts, &l, &view);
+            dc.PopAxisAlignedClip();
+            r?;
         }
         Ok(())
     })

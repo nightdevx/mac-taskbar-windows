@@ -128,7 +128,7 @@ pub fn wifi_glyph(bars: u8) -> char {
 
 /// Icons from right to left, macOS order: network, battery, volume.
 /// Wired with internet shows nothing, as on macOS.
-pub fn icons(st: &Status) -> Vec<Icon> {
+pub fn icons(st: &Status, battery_percent: bool) -> Vec<Icon> {
     let mut out = Vec::new();
     match st.net {
         Net::Wifi(s) => out.push(Icon { under: Some(WIFI_FULL), ..Icon::plain(wifi_glyph(s)) }),
@@ -139,7 +139,8 @@ pub fn icons(st: &Status) -> Vec<Icon> {
     }
     if let Some(b) = st.battery {
         let alert = !b.plugged && b.percent <= LOW_BATTERY;
-        out.push(Icon { size: IconSize::Large, percent: Some(b.percent), alert, ..Icon::plain(battery_glyph(b.percent, b.plugged)) });
+        let percent = battery_percent.then_some(b.percent);
+        out.push(Icon { size: IconSize::Large, percent, alert, ..Icon::plain(battery_glyph(b.percent, b.plugged)) });
     }
     if let Some(v) = st.volume {
         out.push(Icon::plain(volume_glyph(v.level, v.muted)));
@@ -341,7 +342,7 @@ mod tests {
     fn low_battery_alerts_only_when_not_charging() {
         let at = |percent, plugged| {
             let st = Status { battery: Some(Battery { percent, plugged }), ..Status::default() };
-            icons(&st)[0].alert
+            icons(&st, true)[0].alert
         };
         assert!(at(10, false));
         assert!(at(3, false));
@@ -375,19 +376,20 @@ mod tests {
             volume: Some(Volume { level: 0.5, muted: false }),
             net: Net::Wifi(5),
         };
-        let all = icons(&st);
+        let all = icons(&st, true);
         let glyphs: Vec<char> = all.iter().map(|i| i.glyph).collect();
         assert_eq!(glyphs, [WIFI_FULL, battery_glyph(50, false), volume_glyph(0.5, false)]);
         assert_eq!(all[1].percent, Some(50));
         assert_eq!((all[0].size, all[1].size), (IconSize::Normal, IconSize::Large));
         assert_eq!(all[0].under, Some(WIFI_FULL));
         assert!(!all[1].alert);
+        assert_eq!(icons(&st, false)[1].percent, None, "percentage can be turned off");
         let wired = Status { net: Net::Wired, ..st };
-        assert_eq!(icons(&wired).len(), 2);
-        assert!(icons(&Status::default()).is_empty());
-        let wifi_warn = icons(&Status { net: Net::NoInternet { wifi: true }, ..Status::default() })[0];
+        assert_eq!(icons(&wired, true).len(), 2);
+        assert!(icons(&Status::default(), true).is_empty());
+        let wifi_warn = icons(&Status { net: Net::NoInternet { wifi: true }, ..Status::default() }, true)[0];
         assert_eq!((wifi_warn.glyph, wifi_warn.size), ('\u{EB63}', IconSize::Normal));
-        let globe = icons(&Status { net: Net::NoInternet { wifi: false }, ..Status::default() })[0];
+        let globe = icons(&Status { net: Net::NoInternet { wifi: false }, ..Status::default() }, true)[0];
         assert_eq!((globe.glyph, globe.size), ('\u{F384}', IconSize::Small));
     }
 

@@ -312,12 +312,19 @@ impl MenuBar {
     /// Redraws only when an icon actually changes.
     fn set_status(&self, st: status::Status) {
         self.status.set(st);
-        let icons = status::icons(&st);
+        let icons = status::icons(&st, crate::settings::get().battery_percent);
         if self.state.borrow().status == icons {
             return;
         }
         self.state.borrow_mut().status = icons;
         self.redraw();
+    }
+
+    /// Follows a settings change (battery percentage on or off).
+    pub fn apply(&self, before: &crate::settings::Settings, after: &crate::settings::Settings) {
+        if before.battery_percent != after.battery_percent {
+            self.set_status(self.status.get());
+        }
     }
 
     /// Theme or transparency setting changed (both arrive as "ImmersiveColorSet").
