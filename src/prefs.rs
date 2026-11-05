@@ -11,18 +11,24 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
-use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+};
 use windows::Win32::UI::Controls::MARGINS;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
+    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
 use crate::gfx::{self, Gfx, Label};
+use crate::log;
 use crate::settings::{self, DOCK_ICON_MAX, DOCK_ICON_MIN, MAGNIFY_MAX, Settings};
 use crate::theme::{self, Rgba};
 use crate::window::{self, Handler};
-use crate::log;
 
 pub const CLASS: PCWSTR = w!("TaskbarSettings");
 pub const TITLE: &str = "Masaüstü ve Dock";
@@ -56,7 +62,13 @@ pub enum Control {
 }
 
 /// Keyboard focus order, also the order rows are laid out in.
-pub const CONTROLS: [Control; 5] = [Control::Size, Control::Magnify, Control::AutoHide, Control::Indicators, Control::BatteryPercent];
+pub const CONTROLS: [Control; 5] = [
+    Control::Size,
+    Control::Magnify,
+    Control::AutoHide,
+    Control::Indicators,
+    Control::BatteryPercent,
+];
 const GROUPS: [&str; 2] = ["Dock", "Menü çubuğu"];
 
 impl Control {
@@ -86,12 +98,20 @@ impl Control {
         }
     }
     fn value(self, s: &Settings) -> f32 {
-        if self == Control::Magnify { s.dock_magnify } else { s.dock_icon }
+        if self == Control::Magnify {
+            s.dock_magnify
+        } else {
+            s.dock_icon
+        }
     }
     fn set_value(self, s: &mut Settings, v: f32) {
         let (min, max, ..) = self.range();
         let v = v.clamp(min, max);
-        if self == Control::Magnify { s.dock_magnify = v } else { s.dock_icon = v }
+        if self == Control::Magnify {
+            s.dock_magnify = v
+        } else {
+            s.dock_icon = v
+        }
     }
     fn is_on(self, s: &Settings) -> bool {
         match self {
@@ -112,7 +132,12 @@ impl Control {
 }
 
 fn rect(l: f32, t: f32, r: f32, b: f32) -> D2D_RECT_F {
-    D2D_RECT_F { left: l, top: t, right: r, bottom: b }
+    D2D_RECT_F {
+        left: l,
+        top: t,
+        right: r,
+        bottom: b,
+    }
 }
 
 fn inside(r: &D2D_RECT_F, x: f32, y: f32) -> bool {
@@ -138,12 +163,21 @@ pub fn layout() -> Layout {
         groups.push((*title, rect(PAD, top, WIDTH - PAD, bottom)));
         y = bottom + GROUP_GAP;
     }
-    Layout { groups, rows, height: y - GROUP_GAP + PAD }
+    Layout {
+        groups,
+        rows,
+        height: y - GROUP_GAP + PAD,
+    }
 }
 
 fn switch_rect(row: &D2D_RECT_F) -> D2D_RECT_F {
     let mid = (row.top + row.bottom) / 2.0;
-    rect(row.right - INNER - SWITCH_W, mid - SWITCH_H / 2.0, row.right - INNER, mid + SWITCH_H / 2.0)
+    rect(
+        row.right - INNER - SWITCH_W,
+        mid - SWITCH_H / 2.0,
+        row.right - INNER,
+        mid + SWITCH_H / 2.0,
+    )
 }
 
 fn track_rect(row: &D2D_RECT_F) -> D2D_RECT_F {
@@ -176,7 +210,11 @@ pub enum Target {
 pub fn hit(l: &Layout, x: f32, y: f32) -> Option<Target> {
     for (i, cx) in LIGHT_X.iter().enumerate().take(2) {
         if (x - cx).hypot(y - LIGHT_Y) <= LIGHT_R + 2.0 {
-            return Some(if i == 0 { Target::Close } else { Target::Minimize });
+            return Some(if i == 0 {
+                Target::Close
+            } else {
+                Target::Minimize
+            });
         }
     }
     let (c, row) = l.rows.iter().find(|(_, r)| inside(r, x, y))?;
@@ -262,15 +300,29 @@ pub struct View {
 }
 
 fn ellipse(x: f32, y: f32, r: f32) -> D2D1_ELLIPSE {
-    D2D1_ELLIPSE { point: Vector2 { X: x, Y: y }, radiusX: r, radiusY: r }
+    D2D1_ELLIPSE {
+        point: Vector2 { X: x, Y: y },
+        radiusX: r,
+        radiusY: r,
+    }
 }
 
 fn rounded(r: D2D_RECT_F, radius: f32) -> D2D1_ROUNDED_RECT {
-    D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius }
+    D2D1_ROUNDED_RECT {
+        rect: r,
+        radiusX: radius,
+        radiusY: radius,
+    }
 }
 
 /// Draws the whole window in DIPs.
-pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, l: &Layout, v: &View) -> Result<()> {
+pub fn draw(
+    dc: &ID2D1DeviceContext,
+    dwrite: &IDWriteFactory,
+    fonts: &Fonts,
+    l: &Layout,
+    v: &View,
+) -> Result<()> {
     let p = v.palette;
     unsafe {
         let brush = |c: Rgba| dc.CreateSolidColorBrush(&c.d2d(), None);
@@ -287,11 +339,23 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, l: 
             dc.FillEllipse(&ellipse(*cx, LIGHT_Y, LIGHT_R), &brush(c)?);
         }
         let title = Label::new(dwrite, TITLE, &fonts.bold)?;
-        title.draw_text(dc, (WIDTH - title.width) / 2.0, LIGHT_Y * 2.0, fonts.cap, &text);
+        title.draw_text(
+            dc,
+            (WIDTH - title.width) / 2.0,
+            LIGHT_Y * 2.0,
+            fonts.cap,
+            &text,
+        );
 
         let separator = brush(p.separator)?;
         for (name, g) in &l.groups {
-            Label::new(dwrite, name, &fonts.bold)?.draw_text(dc, g.left + 2.0, (g.top - HEADER_H / 2.0) * 2.0 + 2.0, fonts.cap, &text);
+            Label::new(dwrite, name, &fonts.bold)?.draw_text(
+                dc,
+                g.left + 2.0,
+                (g.top - HEADER_H / 2.0) * 2.0 + 2.0,
+                fonts.cap,
+                &text,
+            );
             dc.FillRoundedRectangle(&rounded(*g, RADIUS), &brush(p.group)?);
             dc.DrawRoundedRectangle(&rounded(*g, RADIUS), &brush(p.border)?, 1.0, None);
         }
@@ -299,9 +363,20 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, l: 
             let mid2 = row.top + row.bottom; // band trick: draw_text centres in [0, band]
             let label = Label::new(dwrite, c.label(), &fonts.text)?;
             label.draw_text(dc, row.left + INNER, mid2, fonts.cap, &text);
-            let next_in_group = l.rows.get(i + 1).is_some_and(|(n, _)| n.group() == c.group());
+            let next_in_group = l
+                .rows
+                .get(i + 1)
+                .is_some_and(|(n, _)| n.group() == c.group());
             if next_in_group {
-                dc.FillRectangle(&rect(row.left + INNER, row.bottom - 0.5, row.right - INNER, row.bottom + 0.5), &separator);
+                dc.FillRectangle(
+                    &rect(
+                        row.left + INNER,
+                        row.bottom - 0.5,
+                        row.right - INNER,
+                        row.bottom + 0.5,
+                    ),
+                    &separator,
+                );
             }
             let focused = v.focus == Some(*c);
             match c {
@@ -309,12 +384,21 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, l: 
                     let t = track_rect(row);
                     let (.., low, high) = c.range();
                     let small = Label::new(dwrite, low, &fonts.small)?;
-                    small.draw_text(dc, t.left - 8.0 - small.width, mid2, fonts.cap * 11.0 / 13.0, &secondary);
+                    small.draw_text(
+                        dc,
+                        t.left - 8.0 - small.width,
+                        mid2,
+                        fonts.cap * 11.0 / 13.0,
+                        &secondary,
+                    );
                     let big = Label::new(dwrite, high, &fonts.small)?;
                     big.draw_text(dc, t.right + 8.0, mid2, fonts.cap * 11.0 / 13.0, &secondary);
                     let kx = slider_x(*c, &t, c.value(&v.settings));
                     dc.FillRoundedRectangle(&rounded(t, 2.0), &brush(p.track)?);
-                    dc.FillRoundedRectangle(&rounded(rect(t.left, t.top, kx, t.bottom), 2.0), &accent);
+                    dc.FillRoundedRectangle(
+                        &rounded(rect(t.left, t.top, kx, t.bottom), 2.0),
+                        &accent,
+                    );
                     let ky = (t.top + t.bottom) / 2.0;
                     dc.FillEllipse(&ellipse(kx, ky + 0.75, KNOB / 2.0 + 0.5), &brush(p.shadow)?);
                     dc.FillEllipse(&ellipse(kx, ky, KNOB / 2.0), &brush(p.knob)?);
@@ -325,15 +409,27 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, l: 
                 _ => {
                     let s = switch_rect(row);
                     let on = c.is_on(&v.settings);
-                    dc.FillRoundedRectangle(&rounded(s, SWITCH_H / 2.0), &brush(if on { p.accent } else { p.track })?);
+                    dc.FillRoundedRectangle(
+                        &rounded(s, SWITCH_H / 2.0),
+                        &brush(if on { p.accent } else { p.track })?,
+                    );
                     let r = SWITCH_H / 2.0 - 2.0;
-                    let kx = if on { s.right - 2.0 - r } else { s.left + 2.0 + r };
+                    let kx = if on {
+                        s.right - 2.0 - r
+                    } else {
+                        s.left + 2.0 + r
+                    };
                     let ky = (s.top + s.bottom) / 2.0;
                     dc.FillEllipse(&ellipse(kx, ky + 0.5, r + 0.5), &brush(p.shadow)?);
                     dc.FillEllipse(&ellipse(kx, ky, r), &brush(p.knob)?);
                     if focused {
                         let ring = rect(s.left - 3.0, s.top - 3.0, s.right + 3.0, s.bottom + 3.0);
-                        dc.DrawRoundedRectangle(&rounded(ring, SWITCH_H / 2.0 + 3.0), &accent, 2.0, None);
+                        dc.DrawRoundedRectangle(
+                            &rounded(ring, SWITCH_H / 2.0 + 3.0),
+                            &accent,
+                            2.0,
+                            None,
+                        );
                     }
                 }
             }
@@ -384,7 +480,9 @@ pub fn init(gfx: Rc<Gfx>) -> Result<()> {
 
 /// Opens the window, or brings it forward when it is already open.
 pub fn open() {
-    let Some(p) = PREFS.with(|p| p.get().copied()) else { return };
+    let Some(p) = PREFS.with(|p| p.get().copied()) else {
+        return;
+    };
     let hwnd = p.hwnd.get();
     if !hwnd.is_invalid() && unsafe { IsWindow(Some(hwnd)) }.as_bool() {
         unsafe {
@@ -407,13 +505,31 @@ pub fn refresh() {
 
 impl Prefs {
     fn create(&'static self) -> Result<()> {
-        let hwnd = window::create_with(CLASS, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, self)?;
+        let hwnd = window::create_with(
+            CLASS,
+            WS_EX_NOREDIRECTIONBITMAP,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            self,
+        )?;
         self.hwnd.set(hwnd);
         unsafe {
             let round = DWMWCP_ROUND;
-            _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, 4);
+            _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &round as *const _ as *const _,
+                4,
+            );
             // Keeps the DWM shadow with the caption removed.
-            _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 1, cyBottomHeight: 0 });
+            _ = DwmExtendFrameIntoClientArea(
+                hwnd,
+                &MARGINS {
+                    cxLeftWidth: 0,
+                    cxRightWidth: 0,
+                    cyTopHeight: 1,
+                    cyBottomHeight: 0,
+                },
+            );
         }
         let c = &self.gfx.compositor;
         let target = self.gfx.target(hwnd)?;
@@ -422,7 +538,11 @@ impl Prefs {
         visual.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
         visual.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
         target.SetRoot(&visual)?;
-        *self.comp.borrow_mut() = Some(Comp { _target: target, _visual: visual, surface });
+        *self.comp.borrow_mut() = Some(Comp {
+            _target: target,
+            _visual: visual,
+            surface,
+        });
         self.focus.set(None);
         self.place();
         unsafe {
@@ -443,7 +563,17 @@ impl Prefs {
         let (w, h) = (theme::px(WIDTH, dpi), theme::px(layout().height, dpi));
         let x = (monitor.left + monitor.right - w) / 2;
         let y = monitor.top + (monitor.bottom - monitor.top - h) / 3;
-        unsafe { _ = SetWindowPos(self.hwnd.get(), None, x, y, w, h, SWP_NOZORDER | SWP_FRAMECHANGED) };
+        unsafe {
+            _ = SetWindowPos(
+                self.hwnd.get(),
+                None,
+                x,
+                y,
+                w,
+                h,
+                SWP_NOZORDER | SWP_FRAMECHANGED,
+            )
+        };
         self.apply_theme();
         if let Some(c) = self.comp.borrow().as_ref() {
             _ = self.gfx.resize(&c.surface, w as u32, h as u32);
@@ -457,27 +587,55 @@ impl Prefs {
 
     fn apply_theme(&self) {
         let dark = windows::core::BOOL::from(Self::dark());
-        unsafe { _ = DwmSetWindowAttribute(self.hwnd.get(), DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4) };
+        unsafe {
+            _ = DwmSetWindowAttribute(
+                self.hwnd.get(),
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark as *const _ as *const _,
+                4,
+            )
+        };
     }
 
     fn redraw(&self) {
         let comp = self.comp.borrow();
         let Some(c) = comp.as_ref() else { return };
-        let view = View { settings: settings::get(), focus: self.focus.get(), active: self.active.get(), palette: palette(Self::dark()) };
+        let view = View {
+            settings: settings::get(),
+            focus: self.focus.get(),
+            active: self.active.get(),
+            palette: palette(Self::dark()),
+        };
         let l = layout();
-        if let Err(e) = self.gfx.draw(&c.surface, self.scale(), |dc| draw(dc, &self.gfx.dwrite, &self.fonts, &l, &view)) {
+        if let Err(e) = self.gfx.draw(&c.surface, self.scale(), |dc| {
+            draw(dc, &self.gfx.dwrite, &self.fonts, &l, &view)
+        }) {
             log::error(&format!("settings draw: {e}"));
         }
     }
 
     fn point(&self, lp: LPARAM) -> (f32, f32) {
         let s = self.scale();
-        ((lp.0 & 0xFFFF) as i16 as f32 / s, ((lp.0 >> 16) & 0xFFFF) as i16 as f32 / s)
+        (
+            (lp.0 & 0xFFFF) as i16 as f32 / s,
+            ((lp.0 >> 16) & 0xFFFF) as i16 as f32 / s,
+        )
+    }
+
+    /// Keeps the dock out while its settings change, so the change is visible.
+    fn hold_dock(how: usize) {
+        unsafe {
+            if let Ok(dock) = FindWindowW(crate::dock::CLASS, None) {
+                _ = PostMessageW(Some(dock), crate::dock::WM_HOLD, WPARAM(how), LPARAM(0));
+            }
+        }
     }
 
     fn drag_to(&self, c: Control, x: f32) {
         let l = layout();
-        let Some((_, row)) = l.rows.iter().find(|(r, _)| *r == c) else { return };
+        let Some((_, row)) = l.rows.iter().find(|(r, _)| *r == c) else {
+            return;
+        };
         let v = slider_value(c, &track_rect(row), x);
         settings::update(|s| c.set_value(s, v));
     }
@@ -485,22 +643,33 @@ impl Prefs {
     /// Arrow keys move a slider by a tenth of its range.
     fn step_slider(&self, c: Control, up: bool) {
         let (min, max, step, ..) = c.range();
-        let delta = (((max - min) / 8.0) / step).round().max(1.0) * step * if up { 1.0 } else { -1.0 };
+        let delta =
+            (((max - min) / 8.0) / step).round().max(1.0) * step * if up { 1.0 } else { -1.0 };
+        Self::hold_dock(2);
         settings::update(|s| c.set_value(s, c.value(s) + delta));
     }
 
     fn activate(&self, t: Target) {
         match t {
-            Target::Close => unsafe { _ = PostMessageW(Some(self.hwnd.get()), WM_CLOSE, WPARAM(0), LPARAM(0)) },
+            Target::Close => unsafe {
+                _ = PostMessageW(Some(self.hwnd.get()), WM_CLOSE, WPARAM(0), LPARAM(0))
+            },
             Target::Minimize => unsafe { _ = ShowWindow(self.hwnd.get(), SW_MINIMIZE) },
-            Target::Control(c) => settings::update(|s| c.toggle(s)),
+            Target::Control(c) => {
+                Self::hold_dock(2);
+                settings::update(|s| c.toggle(s));
+            }
             Target::Slider(_) => {}
         }
     }
 
     fn move_focus(&self, back: bool) {
         let n = CONTROLS.len();
-        let next = match self.focus.get().and_then(|f| CONTROLS.iter().position(|c| *c == f)) {
+        let next = match self
+            .focus
+            .get()
+            .and_then(|f| CONTROLS.iter().position(|c| *c == f))
+        {
             Some(i) if back => (i + n - 1) % n,
             Some(i) => (i + 1) % n,
             None if back => n - 1,
@@ -514,12 +683,15 @@ impl Prefs {
         let down = |k: u16| unsafe { GetKeyState(k as i32) } < 0;
         match vk {
             k if k == VK_TAB.0 => self.move_focus(down(VK_SHIFT.0)),
-            k if k == VK_ESCAPE.0 || (k == b'W' as u16 && down(VK_CONTROL.0)) => self.activate(Target::Close),
+            k if k == VK_ESCAPE.0 || (k == b'W' as u16 && down(VK_CONTROL.0)) => {
+                self.activate(Target::Close)
+            }
             k if k == VK_SPACE.0 || k == VK_RETURN.0 => match self.focus.get() {
                 Some(c) if !c.is_slider() => self.activate(Target::Control(c)),
                 _ => return false,
             },
-            k if [VK_LEFT.0, VK_DOWN.0, VK_RIGHT.0, VK_UP.0].contains(&k) => match self.focus.get() {
+            k if [VK_LEFT.0, VK_DOWN.0, VK_RIGHT.0, VK_UP.0].contains(&k) => match self.focus.get()
+            {
                 Some(c) if c.is_slider() => self.step_slider(c, k == VK_RIGHT.0 || k == VK_UP.0),
                 _ => return false,
             },
@@ -535,7 +707,10 @@ impl Handler for Prefs {
             // Client area covers the whole window: we draw our own title bar.
             WM_NCCALCSIZE if wp.0 != 0 => return Some(LRESULT(0)),
             WM_NCHITTEST => {
-                let mut pt = POINT { x: (lp.0 & 0xFFFF) as i16 as i32, y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32 };
+                let mut pt = POINT {
+                    x: (lp.0 & 0xFFFF) as i16 as i32,
+                    y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32,
+                };
                 unsafe { _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut pt) };
                 let s = self.scale();
                 let (x, y) = (pt.x as f32 / s, pt.y as f32 / s);
@@ -552,16 +727,20 @@ impl Handler for Prefs {
                 self.focus.set(None);
                 self.pressed.set(t);
                 if let Some(Target::Slider(c)) = t {
+                    Self::hold_dock(1);
                     self.dragging.set(Some(c));
                     unsafe { SetCapture(hwnd) };
                     self.drag_to(c, x);
                 }
                 self.redraw();
             }
-            WM_MOUSEMOVE if self.dragging.get().is_some() => self.drag_to(self.dragging.get().unwrap(), self.point(lp).0),
+            WM_MOUSEMOVE if self.dragging.get().is_some() => {
+                self.drag_to(self.dragging.get().unwrap(), self.point(lp).0)
+            }
             WM_LBUTTONUP => {
                 if self.dragging.replace(None).is_some() {
                     unsafe { _ = ReleaseCapture() };
+                    Self::hold_dock(0);
                 } else {
                     let (x, y) = self.point(lp);
                     let t = hit(&layout(), x, y);
@@ -573,7 +752,10 @@ impl Handler for Prefs {
             }
             WM_KEYDOWN if self.key(wp.0 as u16) => {}
             WM_SETTINGCHANGE => {
-                if lp.0 != 0 && unsafe { PCWSTR(lp.0 as *const u16).to_string() }.unwrap_or_default() == "ImmersiveColorSet" {
+                if lp.0 != 0
+                    && unsafe { PCWSTR(lp.0 as *const u16).to_string() }.unwrap_or_default()
+                        == "ImmersiveColorSet"
+                {
                     self.apply_theme();
                     self.redraw();
                 }
@@ -616,13 +798,31 @@ mod tests {
         assert_eq!(hit(&l, LIGHT_X[0], LIGHT_Y), Some(Target::Close));
         assert_eq!(hit(&l, LIGHT_X[1], LIGHT_Y), Some(Target::Minimize));
         assert_eq!(hit(&l, LIGHT_X[2], LIGHT_Y), None, "zoom is disabled");
-        assert_eq!(hit(&l, WIDTH / 2.0, 10.0), None, "title bar drags the window");
-        let (_, auto) = l.rows.iter().find(|(c, _)| *c == Control::AutoHide).unwrap();
-        assert_eq!(hit(&l, auto.left + 30.0, auto.top + 10.0), Some(Target::Control(Control::AutoHide)));
+        assert_eq!(
+            hit(&l, WIDTH / 2.0, 10.0),
+            None,
+            "title bar drags the window"
+        );
+        let (_, auto) = l
+            .rows
+            .iter()
+            .find(|(c, _)| *c == Control::AutoHide)
+            .unwrap();
+        assert_eq!(
+            hit(&l, auto.left + 30.0, auto.top + 10.0),
+            Some(Target::Control(Control::AutoHide))
+        );
         let (_, size) = l.rows.iter().find(|(c, _)| *c == Control::Size).unwrap();
         let t = track_rect(size);
-        assert_eq!(hit(&l, (t.left + t.right) / 2.0, (t.top + t.bottom) / 2.0), Some(Target::Slider(Control::Size)));
-        assert_eq!(hit(&l, size.left + 10.0, size.top + 10.0), None, "the size label is not a control");
+        assert_eq!(
+            hit(&l, (t.left + t.right) / 2.0, (t.top + t.bottom) / 2.0),
+            Some(Target::Slider(Control::Size))
+        );
+        assert_eq!(
+            hit(&l, size.left + 10.0, size.top + 10.0),
+            None,
+            "the size label is not a control"
+        );
     }
 
     #[test]
@@ -632,7 +832,14 @@ mod tests {
         assert_eq!(slider_value(Control::Size, &t, 250.0), DOCK_ICON_MAX);
         assert_eq!(slider_value(Control::Size, &t, 150.0), 48.0);
         assert_eq!(slider_x(Control::Size, &t, 48.0), 150.0);
-        assert_eq!(slider_value(Control::Magnify, &t, 100.0), 1.0, "left end is off");
-        assert!((slider_value(Control::Magnify, &t, 153.0) - 1.55).abs() < 1e-4, "0.05 steps");
+        assert_eq!(
+            slider_value(Control::Magnify, &t, 100.0),
+            1.0,
+            "left end is off"
+        );
+        assert!(
+            (slider_value(Control::Magnify, &t, 153.0) - 1.55).abs() < 1e-4,
+            "0.05 steps"
+        );
     }
 }

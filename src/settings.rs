@@ -27,12 +27,23 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { dock_icon: 48.0, dock_autohide: false, dock_indicators: true, dock_magnify: 1.5, pins: None, battery_percent: true }
+        Settings {
+            dock_icon: 48.0,
+            dock_autohide: false,
+            dock_indicators: true,
+            dock_magnify: 1.5,
+            pins: None,
+            battery_percent: true,
+        }
     }
 }
 
 fn file() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("taskbar").join("settings.txt"))
+    Some(
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+            .join("taskbar")
+            .join("settings.txt"),
+    )
 }
 
 pub fn parse(text: &str) -> Settings {
@@ -43,7 +54,9 @@ pub fn parse(text: &str) -> Settings {
         _ => default,
     };
     for line in text.lines() {
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         let value = value.trim();
         match key.trim() {
             "dock_icon" => {
@@ -74,14 +87,19 @@ pub fn format(s: &Settings) -> String {
     );
     match &s.pins {
         Some(pins) if pins.is_empty() => out.push_str("pins =\n"),
-        Some(pins) => pins.iter().for_each(|p| out.push_str(&format!("pin = {p}\n"))),
+        Some(pins) => pins
+            .iter()
+            .for_each(|p| out.push_str(&format!("pin = {p}\n"))),
         None => {}
     }
     out
 }
 
 fn load() -> Settings {
-    file().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| parse(&t)).unwrap_or_default()
+    file()
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .map(|t| parse(&t))
+        .unwrap_or_default()
 }
 
 fn save(s: &Settings) {
@@ -139,20 +157,33 @@ mod tests {
             battery_percent: false,
         };
         assert_eq!(parse(&format(&s)), s);
-        let empty = Settings { pins: Some(Vec::new()), ..Settings::default() };
-        assert_eq!(parse(&format(&empty)), empty, "an emptied pin list stays empty");
+        let empty = Settings {
+            pins: Some(Vec::new()),
+            ..Settings::default()
+        };
+        assert_eq!(
+            parse(&format(&empty)),
+            empty,
+            "an emptied pin list stays empty"
+        );
         assert_eq!(parse(&format(&Settings::default())), Settings::default());
     }
 
     #[test]
     fn bad_input_falls_back() {
-        let s = parse("dock_icon = huge\ndock_autohide = yes\nnonsense\n  dock_icon=500 \nbattery_percent = maybe\n");
+        let s = parse(
+            "dock_icon = huge\ndock_autohide = yes\nnonsense\n  dock_icon=500 \nbattery_percent = maybe\n",
+        );
         assert_eq!(s.dock_icon, 64.0, "clamped, last valid line wins");
         assert!(!s.dock_autohide);
         assert!(s.battery_percent, "bad value keeps the default");
         assert_eq!(parse("dock_icon = 41.6").dock_icon, 42.0, "whole DIPs");
         assert_eq!(parse("dock_magnify = 9").dock_magnify, MAGNIFY_MAX);
-        assert_eq!(parse("dock_magnify = 0.2").dock_magnify, 1.0, "below 1.0 means off");
+        assert_eq!(
+            parse("dock_magnify = 0.2").dock_magnify,
+            1.0,
+            "below 1.0 means off"
+        );
         assert_eq!(parse(""), Settings::default());
     }
 

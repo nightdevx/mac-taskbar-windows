@@ -7,12 +7,18 @@ use std::ffi::c_void;
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HWND, PROPERTYKEY};
 use windows::Win32::Storage::EnhancedStorage::{PKEY_AppUserModel_ID, PKEY_Link_TargetParsingPath};
+use windows::Win32::Storage::FileSystem::{
+    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+};
 use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
-use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
-use windows::Win32::UI::Shell::PropertiesSystem::{GPS_DEFAULT, IPropertyStore, SHGetPropertyStoreForWindow, SHGetPropertyStoreFromParsingName};
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::Win32::UI::Shell::PropertiesSystem::{
+    GPS_DEFAULT, IPropertyStore, SHGetPropertyStoreForWindow, SHGetPropertyStoreFromParsingName,
+};
 use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY};
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use windows::core::{HSTRING, PWSTR};
@@ -34,12 +40,21 @@ pub fn process_identity(hwnd: HWND) -> Option<(String, Option<String>)> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
-    let exe = unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) }
-        .ok()
-        .map(|_| String::from_utf16_lossy(&buf[..len as usize]));
+    let exe = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    }
+    .ok()
+    .map(|_| String::from_utf16_lossy(&buf[..len as usize]));
     let mut len = buf.len() as u32;
-    let package = (unsafe { GetApplicationUserModelId(process, &mut len, Some(PWSTR(buf.as_mut_ptr()))) } == ERROR_SUCCESS)
-        .then(|| String::from_utf16_lossy(&buf[..len.saturating_sub(1) as usize]));
+    let package =
+        (unsafe { GetApplicationUserModelId(process, &mut len, Some(PWSTR(buf.as_mut_ptr()))) }
+            == ERROR_SUCCESS)
+            .then(|| String::from_utf16_lossy(&buf[..len.saturating_sub(1) as usize]));
     unsafe { _ = CloseHandle(process) };
     Some((exe?, package))
 }
@@ -86,20 +101,46 @@ pub fn window_identity(hwnd: HWND) -> Option<AppIdentity> {
     Some(AppIdentity { aumid, exe })
 }
 
+/// Human name for a dock source: Start name of an AUMID, the shell's (localised)
+/// name of a shortcut, the description of an exe.
+pub fn source_name(source: &str) -> String {
+    if let Some(aumid) = source.strip_prefix(r"shell:AppsFolder\") {
+        return aumid_name(aumid).unwrap_or_else(|| aumid.to_string());
+    }
+    if source.to_ascii_lowercase().ends_with(".lnk")
+        && let Some(name) = unsafe {
+            SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(source), None)
+                .and_then(|i| i.GetDisplayName(SIGDN_NORMALDISPLAY))
+                .ok()
+                .and_then(take_pwstr)
+        }
+    {
+        return name;
+    }
+    display_name_fallback(file_description(source).as_deref(), source)
+}
+
 /// Identity of a pin source: a .lnk, `shell:AppsFolder\<AUMID>` or an exe path.
 pub fn source_identity(source: &str) -> Option<AppIdentity> {
     if source.to_ascii_lowercase().ends_with(".lnk") {
         return link_identity(source);
     }
     if let Some(aumid) = source.strip_prefix(r"shell:AppsFolder\") {
-        return Some(AppIdentity { aumid: Some(aumid.to_string()), exe: None });
+        return Some(AppIdentity {
+            aumid: Some(aumid.to_string()),
+            exe: None,
+        });
     }
-    Some(AppIdentity { aumid: None, exe: Some(source.to_lowercase()) })
+    Some(AppIdentity {
+        aumid: None,
+        exe: Some(source.to_lowercase()),
+    })
 }
 
 /// Identity of a pinned shortcut (.lnk): its AUMID property and target exe.
 pub fn link_identity(path: &str) -> Option<AppIdentity> {
-    let store: IPropertyStore = unsafe { SHGetPropertyStoreFromParsingName(&HSTRING::from(path), None, GPS_DEFAULT).ok()? };
+    let store: IPropertyStore =
+        unsafe { SHGetPropertyStoreFromParsingName(&HSTRING::from(path), None, GPS_DEFAULT).ok()? };
     let exe = store_string(&store, &PKEY_Link_TargetParsingPath)
         .filter(|t| t.to_ascii_lowercase().ends_with(".exe"))
         .map(|t| t.to_lowercase());
@@ -147,18 +188,28 @@ pub fn file_description(path: &str) -> Option<String> {
         let query = |key: &str| -> Option<(*const c_void, u32)> {
             let mut p = std::ptr::null_mut();
             let mut len = 0;
-            VerQueryValueW(data.as_ptr() as *const c_void, &HSTRING::from(key), &mut p, &mut len)
-                .as_bool()
-                .then_some((p as *const c_void, len))
+            VerQueryValueW(
+                data.as_ptr() as *const c_void,
+                &HSTRING::from(key),
+                &mut p,
+                &mut len,
+            )
+            .as_bool()
+            .then_some((p as *const c_void, len))
         };
         // Language/codepage pairs the file declares, then the usual English ones.
         let mut langs: Vec<(u16, u16)> = query(r"\VarFileInfo\Translation")
-            .map(|(p, len)| std::slice::from_raw_parts(p as *const (u16, u16), len as usize / 4).to_vec())
+            .map(|(p, len)| {
+                std::slice::from_raw_parts(p as *const (u16, u16), len as usize / 4).to_vec()
+            })
             .unwrap_or_default();
         langs.extend([(0x0409, 0x04B0), (0x0409, 0x04E4)]);
         langs.into_iter().find_map(|(lang, cp)| {
-            let (p, len) = query(&format!(r"\StringFileInfo\{lang:04x}{cp:04x}\FileDescription"))?;
-            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p as *const u16, len as usize));
+            let (p, len) = query(&format!(
+                r"\StringFileInfo\{lang:04x}{cp:04x}\FileDescription"
+            ))?;
+            let s =
+                String::from_utf16_lossy(std::slice::from_raw_parts(p as *const u16, len as usize));
             let s = s.trim_end_matches('\0').trim().to_string();
             (!s.is_empty()).then_some(s)
         })
@@ -171,11 +222,17 @@ pub fn display_name_fallback(desc: Option<&str>, exe_path: &str) -> String {
         return d.to_string();
     }
     let file = exe_path.rsplit(['\\', '/']).next().unwrap_or(exe_path);
-    file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string()
+    file.rsplit_once('.')
+        .map_or(file, |(stem, _)| stem)
+        .to_string()
 }
 
 fn file_name_lower(exe_path: &str) -> String {
-    exe_path.rsplit(['\\', '/']).next().unwrap_or(exe_path).to_ascii_lowercase()
+    exe_path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(exe_path)
+        .to_ascii_lowercase()
 }
 
 /// Shell surfaces (Start, search, lock screen) that should not rename the menu bar,
@@ -207,7 +264,10 @@ pub fn display_name(hwnd: HWND) -> Option<String> {
     if file_name_lower(&exe) == "applicationframehost.exe" {
         return None;
     }
-    Some(display_name_fallback(file_description(&exe).as_deref(), &exe))
+    Some(display_name_fallback(
+        file_description(&exe).as_deref(),
+        &exe,
+    ))
 }
 
 #[cfg(test)]
@@ -216,16 +276,24 @@ mod tests {
 
     #[test]
     fn fallback_prefers_description() {
-        assert_eq!(display_name_fallback(Some("Visual Studio Code"), r"C:\x\Code.exe"), "Visual Studio Code");
+        assert_eq!(
+            display_name_fallback(Some("Visual Studio Code"), r"C:\x\Code.exe"),
+            "Visual Studio Code"
+        );
         assert_eq!(display_name_fallback(Some("   "), r"C:\x\Code.exe"), "Code");
-        assert_eq!(display_name_fallback(None, r"C:\Program Files\App\my.tool.exe"), "my.tool");
+        assert_eq!(
+            display_name_fallback(None, r"C:\Program Files\App\my.tool.exe"),
+            "my.tool"
+        );
         assert_eq!(display_name_fallback(None, "noext"), "noext");
     }
 
     #[test]
     fn shell_hosts_are_ignored_case_insensitively() {
         assert!(is_shell_host(r"C:\Windows\SystemApps\X\SearchHost.exe"));
-        assert!(is_shell_host(r"C:\Windows\SystemApps\X\StartMenuExperienceHost.exe"));
+        assert!(is_shell_host(
+            r"C:\Windows\SystemApps\X\StartMenuExperienceHost.exe"
+        ));
         assert!(!is_shell_host(r"C:\Windows\explorer.exe"));
     }
 
@@ -240,7 +308,10 @@ mod tests {
     #[ignore]
     fn names_of_open_windows() {
         use windows::Win32::Foundation::{LPARAM, TRUE};
-        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GWL_EXSTYLE, GetWindowLongW, GetWindowTextLengthW, IsWindowVisible, WS_EX_TOOLWINDOW};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GWL_EXSTYLE, GetWindowLongW, GetWindowTextLengthW, IsWindowVisible,
+            WS_EX_TOOLWINDOW,
+        };
         unsafe extern "system" fn collect(hwnd: HWND, lp: LPARAM) -> windows::core::BOOL {
             unsafe {
                 let tool = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
@@ -250,27 +321,53 @@ mod tests {
             }
             TRUE
         }
-        unsafe { _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+        unsafe {
+            _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            )
+        };
         let mut list: Vec<HWND> = Vec::new();
         unsafe { _ = EnumWindows(Some(collect), LPARAM(&mut list as *mut _ as isize)) };
         for hwnd in list {
             let (exe, package) = process_identity(hwnd).unwrap_or_default();
             let id = package.unwrap_or_default();
             println!("    identity {:?}", window_identity(hwnd));
-            println!("{:<22} aumid={:<55} apps={:?} -> {:?}", file_name_lower(&exe), id, aumid_name(&id), display_name(hwnd));
+            println!(
+                "{:<22} aumid={:<55} apps={:?} -> {:?}",
+                file_name_lower(&exe),
+                id,
+                aumid_name(&id),
+                display_name(hwnd)
+            );
         }
     }
 
     #[test]
     fn source_identity_kinds() {
-        assert_eq!(source_identity(r"shell:AppsFolder\Pkg_x!App").unwrap(), AppIdentity { aumid: Some("Pkg_x!App".into()), exe: None });
-        assert_eq!(source_identity(r"C:\Apps\Tool.EXE").unwrap(), AppIdentity { aumid: None, exe: Some(r"c:\apps\tool.exe".into()) });
+        assert_eq!(
+            source_identity(r"shell:AppsFolder\Pkg_x!App").unwrap(),
+            AppIdentity {
+                aumid: Some("Pkg_x!App".into()),
+                exe: None
+            }
+        );
+        assert_eq!(
+            source_identity(r"C:\Apps\Tool.EXE").unwrap(),
+            AppIdentity {
+                aumid: None,
+                exe: Some(r"c:\apps\tool.exe".into())
+            }
+        );
         assert!(source_identity(r"C:\missing\nothing.lnk").is_none());
     }
 
     #[test]
     fn same_app_by_aumid_or_exe() {
-        let id = |a: Option<&str>, e: Option<&str>| AppIdentity { aumid: a.map(Into::into), exe: e.map(Into::into) };
+        let id = |a: Option<&str>, e: Option<&str>| AppIdentity {
+            aumid: a.map(Into::into),
+            exe: e.map(Into::into),
+        };
         let brave_pin = id(Some("Brave"), Some("c:/brave/brave.exe"));
         let brave_profile = id(Some("Brave.UserData.Profile1"), Some("C:/Brave/brave.exe"));
         assert!(brave_pin.same_app(&brave_profile));
@@ -284,10 +381,20 @@ mod tests {
     #[test]
     #[ignore]
     fn pinned_links_resolve() {
-        unsafe { _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
-        let dir = std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap()).join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
+        unsafe {
+            _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+            )
+        };
+        let dir = std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap())
+            .join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
         for e in std::fs::read_dir(dir).unwrap().flatten() {
-            println!("{:?} -> {:?}", e.file_name(), link_identity(&e.path().to_string_lossy()));
+            println!(
+                "{:?} -> {:?}",
+                e.file_name(),
+                link_identity(&e.path().to_string_lossy())
+            );
         }
     }
 }

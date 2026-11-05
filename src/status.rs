@@ -7,17 +7,25 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, WPARAM};
-use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl};
-use windows::Win32::Media::Audio::{
-    AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE, EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
-    MMDeviceEnumerator, eConsole, eRender,
+use windows::Win32::Media::Audio::Endpoints::{
+    IAudioEndpointVolume, IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl,
 };
-use windows::Win32::NetworkManagement::IpHelper::{GetNetworkConnectivityHint, NotifyNetworkConnectivityHintChange};
+use windows::Win32::Media::Audio::{
+    AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE, EDataFlow, ERole, IMMDeviceEnumerator,
+    IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator, eConsole, eRender,
+};
+use windows::Win32::NetworkManagement::IpHelper::{
+    GetNetworkConnectivityHint, NotifyNetworkConnectivityHintChange,
+};
 use windows::Win32::NetworkManagement::WiFi::*;
 use windows::Win32::Networking::WinSock::*;
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
-use windows::Win32::System::Power::{GetSystemPowerStatus, RegisterPowerSettingNotification, SYSTEM_POWER_STATUS};
-use windows::Win32::System::SystemServices::{GUID_ACDC_POWER_SOURCE, GUID_BATTERY_PERCENTAGE_REMAINING};
+use windows::Win32::System::Power::{
+    GetSystemPowerStatus, RegisterPowerSettingNotification, SYSTEM_POWER_STATUS,
+};
+use windows::Win32::System::SystemServices::{
+    GUID_ACDC_POWER_SOURCE, GUID_BATTERY_PERCENTAGE_REMAINING,
+};
 use windows::Win32::UI::WindowsAndMessaging::{DEVICE_NOTIFY_WINDOW_HANDLE, PostMessageW, WM_APP};
 use windows::core::{PCWSTR, implement};
 
@@ -48,7 +56,9 @@ pub enum Net {
     Unknown,
     Offline,
     /// Connected without internet; `wifi` picks the Wi-Fi warning glyph over the globe.
-    NoInternet { wifi: bool },
+    NoInternet {
+        wifi: bool,
+    },
     Wired,
     /// Signal bars 0..=5, as Windows reports them.
     Wifi(u8),
@@ -76,7 +86,13 @@ pub struct Icon {
 
 impl Icon {
     fn plain(glyph: char) -> Self {
-        Icon { glyph, under: None, size: IconSize::Normal, percent: None, alert: false }
+        Icon {
+            glyph,
+            under: None,
+            size: IconSize::Normal,
+            percent: None,
+            alert: false,
+        }
     }
 }
 
@@ -131,16 +147,27 @@ pub fn wifi_glyph(bars: u8) -> char {
 pub fn icons(st: &Status, battery_percent: bool) -> Vec<Icon> {
     let mut out = Vec::new();
     match st.net {
-        Net::Wifi(s) => out.push(Icon { under: Some(WIFI_FULL), ..Icon::plain(wifi_glyph(s)) }),
+        Net::Wifi(s) => out.push(Icon {
+            under: Some(WIFI_FULL),
+            ..Icon::plain(wifi_glyph(s))
+        }),
         Net::Offline => out.push(Icon::plain('\u{EB5E}')),
         Net::NoInternet { wifi: true } => out.push(Icon::plain('\u{EB63}')),
-        Net::NoInternet { wifi: false } => out.push(Icon { size: IconSize::Small, ..Icon::plain('\u{F384}') }),
+        Net::NoInternet { wifi: false } => out.push(Icon {
+            size: IconSize::Small,
+            ..Icon::plain('\u{F384}')
+        }),
         Net::Wired | Net::Unknown => {}
     }
     if let Some(b) = st.battery {
         let alert = !b.plugged && b.percent <= LOW_BATTERY;
         let percent = battery_percent.then_some(b.percent);
-        out.push(Icon { size: IconSize::Large, percent, alert, ..Icon::plain(battery_glyph(b.percent, b.plugged)) });
+        out.push(Icon {
+            size: IconSize::Large,
+            percent,
+            alert,
+            ..Icon::plain(battery_glyph(b.percent, b.plugged))
+        });
     }
     if let Some(v) = st.volume {
         out.push(Icon::plain(volume_glyph(v.level, v.muted)));
@@ -149,7 +176,14 @@ pub fn icons(st: &Status, battery_percent: bool) -> Vec<Icon> {
 }
 
 fn post(hwnd: isize, what: usize) {
-    unsafe { _ = PostMessageW(Some(HWND(hwnd as *mut c_void)), WM_STATUS, WPARAM(what), LPARAM(0)) };
+    unsafe {
+        _ = PostMessageW(
+            Some(HWND(hwnd as *mut c_void)),
+            WM_STATUS,
+            WPARAM(what),
+            LPARAM(0),
+        )
+    };
 }
 
 #[implement(IAudioEndpointVolumeCallback)]
@@ -175,13 +209,22 @@ impl IMMNotificationClient_Impl for DeviceChanged_Impl {
     fn OnDeviceRemoved(&self, _: &PCWSTR) -> windows::core::Result<()> {
         Ok(())
     }
-    fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, _: &PCWSTR) -> windows::core::Result<()> {
+    fn OnDefaultDeviceChanged(
+        &self,
+        flow: EDataFlow,
+        role: ERole,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> {
         if flow == eRender && role == eConsole {
             post(self.0, AUDIO_DEVICE);
         }
         Ok(())
     }
-    fn OnPropertyValueChanged(&self, _: &PCWSTR, _: &windows::Win32::Foundation::PROPERTYKEY) -> windows::core::Result<()> {
+    fn OnPropertyValueChanged(
+        &self,
+        _: &PCWSTR,
+        _: &windows::Win32::Foundation::PROPERTYKEY,
+    ) -> windows::core::Result<()> {
         Ok(())
     }
 }
@@ -191,11 +234,22 @@ unsafe extern "system" fn on_connectivity(ctx: *const c_void, _: NL_NETWORK_CONN
 }
 
 unsafe extern "system" fn on_wlan(data: *mut L2_NOTIFICATION_DATA, ctx: *mut c_void) {
-    let Some(d) = (unsafe { data.as_ref() }) else { return };
+    let Some(d) = (unsafe { data.as_ref() }) else {
+        return;
+    };
     let code = d.NotificationCode as i32;
     let relevant = match d.NotificationSource {
-        WLAN_NOTIFICATION_SOURCE_MSM => [wlan_notification_msm_signal_quality_change.0, wlan_notification_msm_connected.0, wlan_notification_msm_disconnected.0].contains(&code),
-        WLAN_NOTIFICATION_SOURCE_ACM => [wlan_notification_acm_connection_complete.0, wlan_notification_acm_disconnected.0].contains(&code),
+        WLAN_NOTIFICATION_SOURCE_MSM => [
+            wlan_notification_msm_signal_quality_change.0,
+            wlan_notification_msm_connected.0,
+            wlan_notification_msm_disconnected.0,
+        ]
+        .contains(&code),
+        WLAN_NOTIFICATION_SOURCE_ACM => [
+            wlan_notification_acm_connection_complete.0,
+            wlan_notification_acm_disconnected.0,
+        ]
+        .contains(&code),
         _ => false,
     };
     if relevant {
@@ -217,21 +271,32 @@ impl Sources {
         let volume_cb: IAudioEndpointVolumeCallback = VolumeChanged(ctx).into();
         let device_cb: IMMNotificationClient = DeviceChanged(ctx).into();
 
-        let enumerator = unsafe { CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) }
-            .inspect_err(|e| log::error(&format!("audio: {e}")))
-            .ok();
+        let enumerator = unsafe {
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        }
+        .inspect_err(|e| log::error(&format!("audio: {e}")))
+        .ok();
         if let Some(en) = &enumerator {
             unsafe { _ = en.RegisterEndpointNotificationCallback(&device_cb) };
         }
 
         unsafe {
             for guid in [GUID_BATTERY_PERCENTAGE_REMAINING, GUID_ACDC_POWER_SOURCE] {
-                if let Err(e) = RegisterPowerSettingNotification(HANDLE(hwnd.0), &guid, DEVICE_NOTIFY_WINDOW_HANDLE) {
+                if let Err(e) = RegisterPowerSettingNotification(
+                    HANDLE(hwnd.0),
+                    &guid,
+                    DEVICE_NOTIFY_WINDOW_HANDLE,
+                ) {
                     log::error(&format!("power notification: {e}"));
                 }
             }
             let mut hint_handle = HANDLE::default();
-            let err = NotifyNetworkConnectivityHintChange(Some(on_connectivity), Some(ctx as *const c_void), false, &mut hint_handle);
+            let err = NotifyNetworkConnectivityHintChange(
+                Some(on_connectivity),
+                Some(ctx as *const c_void),
+                false,
+                &mut hint_handle,
+            );
             if err.is_err() {
                 log::error(&format!("connectivity notification: {err:?}"));
             }
@@ -243,11 +308,24 @@ impl Sources {
             let mut version = 0;
             let mut handle = HANDLE::default();
             if WlanOpenHandle(2, None, &mut version, &mut handle) == 0 {
-                WlanRegisterNotification(handle, WLAN_NOTIFICATION_SOURCE_ACM | WLAN_NOTIFICATION_SOURCE_MSM, true, Some(on_wlan), Some(ctx as *const c_void), None, None);
+                WlanRegisterNotification(
+                    handle,
+                    WLAN_NOTIFICATION_SOURCE_ACM | WLAN_NOTIFICATION_SOURCE_MSM,
+                    true,
+                    Some(on_wlan),
+                    Some(ctx as *const c_void),
+                    None,
+                    None,
+                );
             }
         }
 
-        let sources = Sources { enumerator, volume_cb, _device_cb: device_cb, endpoint: RefCell::new(None) };
+        let sources = Sources {
+            enumerator,
+            volume_cb,
+            _device_cb: device_cb,
+            endpoint: RefCell::new(None),
+        };
         sources.bind_audio();
         sources
     }
@@ -272,15 +350,23 @@ impl Sources {
     }
 
     pub fn read(&self) -> Status {
-        Status { battery: read_battery(), volume: self.read_volume(), net: read_net() }
+        Status {
+            battery: read_battery(),
+            volume: self.read_volume(),
+            net: read_net(),
+        }
     }
 
     pub fn read_volume(&self) -> Option<Volume> {
         let ep = self.endpoint.borrow();
         let ep = ep.as_ref()?;
-        unsafe { Some(Volume { level: ep.GetMasterVolumeLevelScalar().ok()?, muted: ep.GetMute().ok()?.as_bool() }) }
+        unsafe {
+            Some(Volume {
+                level: ep.GetMasterVolumeLevelScalar().ok()?,
+                muted: ep.GetMute().ok()?.as_bool(),
+            })
+        }
     }
-
 }
 
 /// Signal bars come from the connection profile: on Windows 11 the WLAN API
@@ -292,9 +378,14 @@ pub fn read_net() -> Net {
     if let Ok(p) = NetworkInformation::GetInternetConnectionProfile() {
         let wifi = p.IsWlanConnectionProfile().unwrap_or(false);
         match p.GetNetworkConnectivityLevel() {
-            Ok(NetworkConnectivityLevel::InternetAccess) if wifi => return Net::Wifi(p.GetSignalBars().and_then(|b| b.Value()).unwrap_or(0)),
+            Ok(NetworkConnectivityLevel::InternetAccess) if wifi => {
+                return Net::Wifi(p.GetSignalBars().and_then(|b| b.Value()).unwrap_or(0));
+            }
             Ok(NetworkConnectivityLevel::InternetAccess) => return Net::Wired,
-            Ok(NetworkConnectivityLevel::ConstrainedInternetAccess | NetworkConnectivityLevel::LocalAccess) => return Net::NoInternet { wifi },
+            Ok(
+                NetworkConnectivityLevel::ConstrainedInternetAccess
+                | NetworkConnectivityLevel::LocalAccess,
+            ) => return Net::NoInternet { wifi },
             _ => {}
         }
     }
@@ -305,7 +396,8 @@ pub fn read_net() -> Net {
     match hint.ConnectivityLevel {
         NetworkConnectivityLevelHintNone => Net::Offline,
         // ponytail: without a profile we cannot tell Wi-Fi from cable here, so the globe shows.
-        NetworkConnectivityLevelHintLocalAccess | NetworkConnectivityLevelHintConstrainedInternetAccess => Net::NoInternet { wifi: false },
+        NetworkConnectivityLevelHintLocalAccess
+        | NetworkConnectivityLevelHintConstrainedInternetAccess => Net::NoInternet { wifi: false },
         _ => Net::Unknown,
     }
 }
@@ -317,7 +409,10 @@ pub fn read_battery() -> Option<Battery> {
     if ps.BatteryFlag & 128 != 0 || ps.BatteryFlag == 255 || ps.BatteryLifePercent > 100 {
         return None;
     }
-    Some(Battery { percent: ps.BatteryLifePercent, plugged: ps.ACLineStatus == 1 })
+    Some(Battery {
+        percent: ps.BatteryLifePercent,
+        plugged: ps.ACLineStatus == 1,
+    })
 }
 
 #[cfg(test)]
@@ -341,7 +436,10 @@ mod tests {
     #[test]
     fn low_battery_alerts_only_when_not_charging() {
         let at = |percent, plugged| {
-            let st = Status { battery: Some(Battery { percent, plugged }), ..Status::default() };
+            let st = Status {
+                battery: Some(Battery { percent, plugged }),
+                ..Status::default()
+            };
             icons(&st, true)[0].alert
         };
         assert!(at(10, false));
@@ -372,25 +470,62 @@ mod tests {
     #[test]
     fn icon_order_and_wired_hidden() {
         let st = Status {
-            battery: Some(Battery { percent: 50, plugged: false }),
-            volume: Some(Volume { level: 0.5, muted: false }),
+            battery: Some(Battery {
+                percent: 50,
+                plugged: false,
+            }),
+            volume: Some(Volume {
+                level: 0.5,
+                muted: false,
+            }),
             net: Net::Wifi(5),
         };
         let all = icons(&st, true);
         let glyphs: Vec<char> = all.iter().map(|i| i.glyph).collect();
-        assert_eq!(glyphs, [WIFI_FULL, battery_glyph(50, false), volume_glyph(0.5, false)]);
+        assert_eq!(
+            glyphs,
+            [
+                WIFI_FULL,
+                battery_glyph(50, false),
+                volume_glyph(0.5, false)
+            ]
+        );
         assert_eq!(all[1].percent, Some(50));
-        assert_eq!((all[0].size, all[1].size), (IconSize::Normal, IconSize::Large));
+        assert_eq!(
+            (all[0].size, all[1].size),
+            (IconSize::Normal, IconSize::Large)
+        );
         assert_eq!(all[0].under, Some(WIFI_FULL));
         assert!(!all[1].alert);
-        assert_eq!(icons(&st, false)[1].percent, None, "percentage can be turned off");
-        let wired = Status { net: Net::Wired, ..st };
+        assert_eq!(
+            icons(&st, false)[1].percent,
+            None,
+            "percentage can be turned off"
+        );
+        let wired = Status {
+            net: Net::Wired,
+            ..st
+        };
         assert_eq!(icons(&wired, true).len(), 2);
         assert!(icons(&Status::default(), true).is_empty());
-        let wifi_warn = icons(&Status { net: Net::NoInternet { wifi: true }, ..Status::default() }, true)[0];
-        assert_eq!((wifi_warn.glyph, wifi_warn.size), ('\u{EB63}', IconSize::Normal));
-        let globe = icons(&Status { net: Net::NoInternet { wifi: false }, ..Status::default() }, true)[0];
+        let wifi_warn = icons(
+            &Status {
+                net: Net::NoInternet { wifi: true },
+                ..Status::default()
+            },
+            true,
+        )[0];
+        assert_eq!(
+            (wifi_warn.glyph, wifi_warn.size),
+            ('\u{EB63}', IconSize::Normal)
+        );
+        let globe = icons(
+            &Status {
+                net: Net::NoInternet { wifi: false },
+                ..Status::default()
+            },
+            true,
+        )[0];
         assert_eq!((globe.glyph, globe.size), ('\u{F384}', IconSize::Small));
     }
-
 }

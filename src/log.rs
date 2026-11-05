@@ -21,7 +21,11 @@ fn write(level: &str, msg: &str) {
     let too_big = std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES);
     let mut opts = OpenOptions::new();
     opts.create(true);
-    if too_big { opts.write(true).truncate(true) } else { opts.append(true) };
+    if too_big {
+        opts.write(true).truncate(true)
+    } else {
+        opts.append(true)
+    };
     if let Ok(mut f) = opts.open(&path) {
         let t = unsafe { GetLocalTime() };
         let _ = writeln!(

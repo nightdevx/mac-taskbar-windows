@@ -4,10 +4,18 @@
 use std::sync::mpsc::{Sender, channel};
 
 use windows::Win32::Foundation::{HWND, LPARAM, SIZE, WPARAM};
-use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, HBITMAP, HGDIOBJ, ReleaseDC};
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, HBITMAP,
+    HGDIOBJ, ReleaseDC,
+};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
-use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SHDefExtractIconW, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY};
-use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO, PostMessageW};
+use windows::Win32::UI::Shell::{
+    IShellItemImageFactory, SHCreateItemFromParsingName, SHDefExtractIconW, SIIGBF_BIGGERSIZEOK,
+    SIIGBF_ICONONLY,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DestroyIcon, GetIconInfo, HICON, ICONINFO, PostMessageW,
+};
 use windows::core::HSTRING;
 
 /// A square icon, BGRA with premultiplied alpha. Empty `pixels` means extraction failed.
@@ -34,7 +42,15 @@ fn take_pixels(bmp: HBITMAP, size: u32) -> Option<Vec<u8>> {
     let mut px = vec![0u8; (size * size * 4) as usize];
     unsafe {
         let dc = GetDC(None);
-        let rows = GetDIBits(dc, bmp, 0, size, Some(px.as_mut_ptr() as *mut _), &mut info, DIB_RGB_COLORS);
+        let rows = GetDIBits(
+            dc,
+            bmp,
+            0,
+            size,
+            Some(px.as_mut_ptr() as *mut _),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
         ReleaseDC(None, dc);
         _ = DeleteObject(HGDIOBJ(bmp.0));
         (rows == size as i32).then_some(px)
@@ -46,7 +62,9 @@ fn take_pixels(bmp: HBITMAP, size: u32) -> Option<Vec<u8>> {
 fn exe_icon(path: &str, size: u32) -> Option<Vec<u8>> {
     unsafe {
         let mut hicon = HICON::default();
-        SHDefExtractIconW(&HSTRING::from(path), 0, 0, Some(&mut hicon), None, size).ok().ok()?;
+        SHDefExtractIconW(&HSTRING::from(path), 0, 0, Some(&mut hicon), None, size)
+            .ok()
+            .ok()?;
         let mut info = ICONINFO::default();
         let got = GetIconInfo(hicon, &mut info);
         _ = DestroyIcon(hicon);
@@ -69,16 +87,34 @@ fn exe_icon(path: &str, size: u32) -> Option<Vec<u8>> {
 /// Shell icon for a parsing name: an exe or .lnk path, or `shell:AppsFolder\<AUMID>`.
 /// Needs COM on the calling thread.
 pub fn load(source: &str, size: u32) -> Icon {
-    let from_exe = || source.to_ascii_lowercase().ends_with(".exe").then(|| exe_icon(source, size)).flatten();
+    let from_exe = || {
+        source
+            .to_ascii_lowercase()
+            .ends_with(".exe")
+            .then(|| exe_icon(source, size))
+            .flatten()
+    };
     let from_shell = || unsafe {
         SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(&HSTRING::from(source), None)
-            .and_then(|f| f.GetImage(SIZE { cx: size as i32, cy: size as i32 }, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK))
+            .and_then(|f| {
+                f.GetImage(
+                    SIZE {
+                        cx: size as i32,
+                        cy: size as i32,
+                    },
+                    SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+                )
+            })
             .ok()
             .and_then(|bmp| take_pixels(bmp, size))
     };
     let mut pixels = from_exe().or_else(from_shell).unwrap_or_default();
     normalize_alpha(&mut pixels);
-    Icon { source: source.to_string(), size, pixels }
+    Icon {
+        source: source.to_string(),
+        size,
+        pixels,
+    }
 }
 
 /// The shell hands back straight alpha for some icons and no alpha at all for
@@ -91,7 +127,10 @@ pub fn normalize_alpha(px: &mut [u8]) {
         px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
         return;
     }
-    if px.chunks_exact(4).any(|p| p[0] > p[3] || p[1] > p[3] || p[2] > p[3]) {
+    if px
+        .chunks_exact(4)
+        .any(|p| p[0] > p[3] || p[1] > p[3] || p[2] > p[3])
+    {
         for p in px.chunks_exact_mut(4) {
             let a = p[3] as u32;
             for c in &mut p[..3] {
@@ -114,7 +153,14 @@ impl Loader {
             unsafe { _ = CoInitializeEx(None, COINIT_MULTITHREADED) };
             for (source, size) in rx {
                 let icon = Box::into_raw(Box::new(load(&source, size)));
-                let posted = unsafe { PostMessageW(Some(HWND(target as *mut _)), msg, WPARAM(0), LPARAM(icon as isize)) };
+                let posted = unsafe {
+                    PostMessageW(
+                        Some(HWND(target as *mut _)),
+                        msg,
+                        WPARAM(0),
+                        LPARAM(icon as isize),
+                    )
+                };
                 if posted.is_err() {
                     drop(unsafe { Box::from_raw(icon) }); // window is gone
                 }
@@ -165,6 +211,9 @@ mod tests {
         let icon = load(r"C:\Windows\explorer.exe", 64);
         assert_eq!(icon.pixels.len(), 64 * 64 * 4);
         assert!(icon.pixels.chunks_exact(4).any(|p| p[3] == 255));
-        assert!(icon.pixels.chunks_exact(4).any(|p| p[3] == 0), "corners should be transparent");
+        assert!(
+            icon.pixels.chunks_exact(4).any(|p| p[3] == 0),
+            "corners should be transparent"
+        );
     }
 }

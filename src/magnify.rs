@@ -24,10 +24,18 @@ pub fn scale(g: Geometry, distance: f32, max: f32) -> f32 {
 /// Layout for `n` icons with the pointer at `x` (None: at rest).
 pub fn layout(g: Geometry, n: usize, x: Option<f32>, max: f32) -> Layout {
     let step = g.icon + g.gap();
-    let rest = Layout { items: (0..n).map(|i| (g.item_x(i), 1.0)).collect(), left: 0.0, right: g.width(n) };
-    let Some(x) = x.filter(|_| max > 1.0 && n > 0) else { return rest };
+    let rest = Layout {
+        items: (0..n).map(|i| (g.item_x(i), 1.0)).collect(),
+        left: 0.0,
+        right: g.width(n),
+    };
+    let Some(x) = x.filter(|_| max > 1.0 && n > 0) else {
+        return rest;
+    };
 
-    let scales: Vec<f32> = (0..n).map(|i| scale(g, x - (g.item_x(i) + g.icon / 2.0), max)).collect();
+    let scales: Vec<f32> = (0..n)
+        .map(|i| scale(g, x - (g.item_x(i) + g.icon / 2.0), max))
+        .collect();
     let mut lefts = Vec::with_capacity(n);
     let mut edge = g.pad();
     for s in &scales {
@@ -42,7 +50,11 @@ pub fn layout(g: Geometry, n: usize, x: Option<f32>, max: f32) -> Layout {
     let shift = x - moved;
 
     Layout {
-        items: lefts.iter().zip(&scales).map(|(l, s)| (l + shift, *s)).collect(),
+        items: lefts
+            .iter()
+            .zip(&scales)
+            .map(|(l, s)| (l + shift, *s))
+            .collect(),
         left: shift,
         right: shift + edge - g.gap() + g.pad(),
     }
@@ -94,12 +106,21 @@ mod tests {
             let l = layout(G, 6, Some(x), 1.8);
             for w in l.items.windows(2) {
                 let (a, b) = (w[0], w[1]);
-                assert!(b.0 >= a.0 + G.icon * a.1 + G.gap() - 0.01, "overlap at x={x}");
+                assert!(
+                    b.0 >= a.0 + G.icon * a.1 + G.gap() - 0.01,
+                    "overlap at x={x}"
+                );
             }
             let i = hit(G, &l, x).unwrap();
             let (left, s) = l.items[i];
-            assert!(x >= left - G.gap() && x <= left + G.icon * s + G.gap(), "x={x} drifted off icon {i}");
-            assert!(l.left <= 0.0 && l.right >= G.width(6), "background grows, never shrinks");
+            assert!(
+                x >= left - G.gap() && x <= left + G.icon * s + G.gap(),
+                "x={x} drifted off icon {i}"
+            );
+            assert!(
+                l.left <= 0.0 && l.right >= G.width(6),
+                "background grows, never shrinks"
+            );
         }
     }
 
@@ -110,7 +131,10 @@ mod tests {
         let l = layout(G, n, Some(x), 1.6);
         let grew_left = -l.left;
         let grew_right = l.right - G.width(n);
-        assert!((grew_left - grew_right).abs() < 0.01, "{grew_left} vs {grew_right}");
+        assert!(
+            (grew_left - grew_right).abs() < 0.01,
+            "{grew_left} vs {grew_right}"
+        );
         assert_eq!(l.items[2].1, 1.6);
     }
 

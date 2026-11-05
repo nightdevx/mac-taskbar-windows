@@ -16,7 +16,8 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::WinRT::Composition::{
-    ICompositionDrawingSurfaceInterop, ICompositionGraphicsDeviceInterop, ICompositorDesktopInterop, ICompositorInterop,
+    ICompositionDrawingSurfaceInterop, ICompositionGraphicsDeviceInterop,
+    ICompositorDesktopInterop, ICompositorInterop,
 };
 use windows::core::{Interface, PCWSTR, Result, w};
 use windows_numerics::Matrix3x2;
@@ -58,36 +59,65 @@ fn d2d_device(factory: &ID2D1Factory1) -> Result<ID2D1Device> {
 impl Gfx {
     /// Needs a DispatcherQueue on the calling thread (see main.rs).
     pub fn new() -> Result<Self> {
-        let d2d_factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+        let d2d_factory: ID2D1Factory1 =
+            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
         let dwrite = dwrite()?;
         let device = d2d_device(&d2d_factory)?;
         let compositor = Compositor::new()?;
-        let graphics = unsafe { compositor.cast::<ICompositorInterop>()?.CreateGraphicsDevice(&device)? };
-        Ok(Self { compositor, dwrite, d2d_factory, graphics, d2d_device: RefCell::new(device) })
+        let graphics = unsafe {
+            compositor
+                .cast::<ICompositorInterop>()?
+                .CreateGraphicsDevice(&device)?
+        };
+        Ok(Self {
+            compositor,
+            dwrite,
+            d2d_factory,
+            graphics,
+            d2d_device: RefCell::new(device),
+        })
     }
 
     pub fn target(&self, hwnd: HWND) -> Result<DesktopWindowTarget> {
-        unsafe { self.compositor.cast::<ICompositorDesktopInterop>()?.CreateDesktopWindowTarget(hwnd, true) }
+        unsafe {
+            self.compositor
+                .cast::<ICompositorDesktopInterop>()?
+                .CreateDesktopWindowTarget(hwnd, true)
+        }
     }
 
     pub fn surface(&self, w: u32, h: u32) -> Result<CompositionDrawingSurface> {
         self.graphics.CreateDrawingSurface(
-            Size { Width: w.max(1) as f32, Height: h.max(1) as f32 },
+            Size {
+                Width: w.max(1) as f32,
+                Height: h.max(1) as f32,
+            },
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
             DirectXAlphaMode::Premultiplied,
         )
     }
 
     pub fn resize(&self, surface: &CompositionDrawingSurface, w: u32, h: u32) -> Result<()> {
-        let size = SIZE { cx: w.max(1) as i32, cy: h.max(1) as i32 };
-        unsafe { surface.cast::<ICompositionDrawingSurfaceInterop>()?.Resize(size) }
+        let size = SIZE {
+            cx: w.max(1) as i32,
+            cy: h.max(1) as i32,
+        };
+        unsafe {
+            surface
+                .cast::<ICompositionDrawingSurfaceInterop>()?
+                .Resize(size)
+        }
     }
 
     /// Replaces the D2D device after a GPU reset or driver update.
     /// Composition then drops surface contents, so callers redraw everything.
     pub fn recreate_device(&self) -> Result<()> {
         let device = d2d_device(&self.d2d_factory)?;
-        unsafe { self.graphics.cast::<ICompositionGraphicsDeviceInterop>()?.SetRenderingDevice(&device)? };
+        unsafe {
+            self.graphics
+                .cast::<ICompositionGraphicsDeviceInterop>()?
+                .SetRenderingDevice(&device)?
+        };
         *self.d2d_device.borrow_mut() = device;
         Ok(())
     }
@@ -121,7 +151,10 @@ impl Gfx {
         let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, &mut offset)? };
         let result = unsafe {
             dc.SetDpi(96.0 * scale, 96.0 * scale);
-            dc.SetTransform(&Matrix3x2::translation(offset.x as f32 / scale, offset.y as f32 / scale));
+            dc.SetTransform(&Matrix3x2::translation(
+                offset.x as f32 / scale,
+                offset.y as f32 / scale,
+            ));
             dc.Clear(Some(&D2D1_COLOR_F::default()));
             f(&dc)
         };
@@ -134,7 +167,12 @@ pub fn dwrite() -> Result<IDWriteFactory> {
     unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
 }
 
-pub fn text_format(dwrite: &IDWriteFactory, family: &str, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
+pub fn text_format(
+    dwrite: &IDWriteFactory,
+    family: &str,
+    size: f32,
+    weight: DWRITE_FONT_WEIGHT,
+) -> Result<IDWriteTextFormat> {
     let family: Vec<u16> = family.encode_utf16().chain([0]).collect();
     unsafe {
         let fmt = dwrite.CreateTextFormat(
@@ -153,7 +191,12 @@ pub fn text_format(dwrite: &IDWriteFactory, family: &str, size: f32, weight: DWR
 
 fn is_device_lost(e: &windows::core::Error) -> bool {
     use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET};
-    [DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, windows::Win32::Foundation::D2DERR_RECREATE_TARGET].contains(&e.code())
+    [
+        DXGI_ERROR_DEVICE_REMOVED,
+        DXGI_ERROR_DEVICE_RESET,
+        windows::Win32::Foundation::D2DERR_RECREATE_TARGET,
+    ]
+    .contains(&e.code())
 }
 
 /// Rounds DIP values to whole device pixels of `dc`, so edges stay crisp at 125 % and 150 %.
@@ -176,7 +219,11 @@ pub fn cap_height(dwrite: &IDWriteFactory, family: &str, size: f32) -> Result<f3
         if !exists.as_bool() {
             return Ok(size * 0.7); // typical Latin cap height
         }
-        let font = fonts.GetFontFamily(index)?.GetFirstMatchingFont(DWRITE_FONT_WEIGHT_REGULAR, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL)?;
+        let font = fonts.GetFontFamily(index)?.GetFirstMatchingFont(
+            DWRITE_FONT_WEIGHT_REGULAR,
+            DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+        )?;
         let mut m = DWRITE_FONT_METRICS::default();
         font.GetMetrics(&mut m);
         Ok(m.capHeight as f32 * size / m.designUnitsPerEm as f32)
@@ -202,12 +249,20 @@ impl Label {
     }
 
     /// Text cut with an ellipsis ("Visual Studio Co…") when wider than `max_w`.
-    pub fn fitted(dwrite: &IDWriteFactory, text: &str, fmt: &IDWriteTextFormat, max_w: f32) -> Result<Self> {
+    pub fn fitted(
+        dwrite: &IDWriteFactory,
+        text: &str,
+        fmt: &IDWriteTextFormat,
+        max_w: f32,
+    ) -> Result<Self> {
         let wide: Vec<u16> = text.encode_utf16().collect();
         unsafe {
             let layout = dwrite.CreateTextLayout(&wide, fmt, max_w.max(0.0), f32::MAX)?;
             if max_w < f32::MAX {
-                let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, ..Default::default() };
+                let trimming = DWRITE_TRIMMING {
+                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                    ..Default::default()
+                };
                 layout.SetTrimming(&trimming, &dwrite.CreateEllipsisTrimmingSign(fmt)?)?;
             }
             let mut m = DWRITE_TEXT_METRICS::default();
@@ -219,14 +274,33 @@ impl Label {
             let mut line = [DWRITE_LINE_METRICS::default()];
             let mut lines = 0;
             layout.GetLineMetrics(Some(&mut line), &mut lines)?;
-            Ok(Self { layout, width, height: m.height, ink_left: -ink.left, ink_right: -ink.right, baseline: line[0].baseline })
+            Ok(Self {
+                layout,
+                width,
+                height: m.height,
+                ink_left: -ink.left,
+                ink_right: -ink.right,
+                baseline: line[0].baseline,
+            })
         }
     }
 
     /// Text: puts the middle of the capitals on the middle of the band.
-    pub fn draw_text(&self, dc: &ID2D1DeviceContext, x: f32, band_h: f32, cap: f32, brush: &ID2D1SolidColorBrush) {
+    pub fn draw_text(
+        &self,
+        dc: &ID2D1DeviceContext,
+        x: f32,
+        band_h: f32,
+        cap: f32,
+        brush: &ID2D1SolidColorBrush,
+    ) {
         let snap = pixel_snapper(dc);
-        self.draw_at(dc, snap(x), snap((band_h + cap) / 2.0) - self.baseline, brush);
+        self.draw_at(
+            dc,
+            snap(x),
+            snap((band_h + cap) / 2.0) - self.baseline,
+            brush,
+        );
     }
 
     /// Icon glyphs: centres the line box, which matches their ink, in a band `[0, band_h]`.

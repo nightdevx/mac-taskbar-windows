@@ -98,27 +98,51 @@ pub fn decode(wparam: usize, lparam: isize) -> ShellEvent {
 mod tests {
     use super::*;
 
-    const APP: WinInfo = WinInfo { visible: true, ex_style: 0, owned: false, cloaked: false };
+    const APP: WinInfo = WinInfo {
+        visible: true,
+        ex_style: 0,
+        owned: false,
+        cloaked: false,
+    };
 
     #[test]
     fn plain_visible_window_qualifies() {
         assert!(is_taskbar_window(&APP));
-        assert!(!is_taskbar_window(&WinInfo { visible: false, ..APP }));
-        assert!(!is_taskbar_window(&WinInfo { cloaked: true, ..APP }));
+        assert!(!is_taskbar_window(&WinInfo {
+            visible: false,
+            ..APP
+        }));
+        assert!(!is_taskbar_window(&WinInfo {
+            cloaked: true,
+            ..APP
+        }));
     }
 
     #[test]
     fn tool_owned_and_noactivate_windows_are_skipped() {
-        assert!(!is_taskbar_window(&WinInfo { ex_style: WS_EX_TOOLWINDOW.0, ..APP }));
+        assert!(!is_taskbar_window(&WinInfo {
+            ex_style: WS_EX_TOOLWINDOW.0,
+            ..APP
+        }));
         assert!(!is_taskbar_window(&WinInfo { owned: true, ..APP }));
-        assert!(!is_taskbar_window(&WinInfo { ex_style: WS_EX_NOACTIVATE.0, ..APP }));
+        assert!(!is_taskbar_window(&WinInfo {
+            ex_style: WS_EX_NOACTIVATE.0,
+            ..APP
+        }));
     }
 
     #[test]
     fn appwindow_forces_an_entry_but_not_when_cloaked() {
-        let forced = WinInfo { ex_style: WS_EX_APPWINDOW.0 | WS_EX_TOOLWINDOW.0, owned: true, ..APP };
+        let forced = WinInfo {
+            ex_style: WS_EX_APPWINDOW.0 | WS_EX_TOOLWINDOW.0,
+            owned: true,
+            ..APP
+        };
         assert!(is_taskbar_window(&forced));
-        assert!(!is_taskbar_window(&WinInfo { cloaked: true, ..forced }));
+        assert!(!is_taskbar_window(&WinInfo {
+            cloaked: true,
+            ..forced
+        }));
     }
 
     #[test]
@@ -140,7 +164,11 @@ mod tests {
         for hwnd in enumerate() {
             let mut buf = [0u16; 128];
             let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
-            println!("{:?} {}", hwnd.0, String::from_utf16_lossy(&buf[..n as usize]));
+            println!(
+                "{:?} {}",
+                hwnd.0,
+                String::from_utf16_lossy(&buf[..n as usize])
+            );
         }
     }
 }

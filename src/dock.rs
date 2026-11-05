@@ -9,11 +9,13 @@ use std::rc::Rc;
 use windows::Foundation::TimeSpan;
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
-    CompositionDrawingSurface, CompositionRoundedRectangleGeometry, CompositionSurfaceBrush, Compositor, ContainerVisual,
-    ImplicitAnimationCollection, SpriteVisual,
+    CompositionDrawingSurface, CompositionRoundedRectangleGeometry, CompositionSurfaceBrush,
+    Compositor, ContainerVisual, ImplicitAnimationCollection, SpriteVisual,
 };
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
+};
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
@@ -31,7 +33,7 @@ use crate::settings::{self, Settings};
 use crate::theme::{self, Palette};
 use crate::window::{self, Backdrop, Handler};
 use crate::winlist::{self, ShellEvent};
-use crate::{appbar, log, magnify};
+use crate::{appbar, log, magnify, menu, popup, preview};
 
 pub const CLASS: PCWSTR = w!("TaskbarDock");
 const WM_APPBAR: u32 = WM_APP + 1;
@@ -40,12 +42,22 @@ const WM_ICON: u32 = WM_APP + 4;
 const WM_RECHECK: u32 = WM_APP + 5;
 /// `--settings` from a second launch asks the running instance to open settings.
 pub const WM_OPEN_SETTINGS: u32 = WM_APP + 6;
+/// Keep the dock out while settings change it: wparam 1 hold, 0 release, 2 peek.
+pub const WM_HOLD: u32 = WM_APP + 7;
 /// Lives in UI::Controls in windows-rs; not worth the feature for one constant.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_HIDE: usize = 1;
 const TIMER_REGION: usize = 2;
 /// After magnified icons settle back, shrink the window region to the dock.
 const TIMER_REST: usize = 3;
+/// Entering animation done: icons now follow the pointer directly.
+const TIMER_FOLLOW: usize = 4;
+/// Hover this long on an icon before its preview opens.
+const TIMER_PREVIEW: usize = 5;
+/// Release a short "peek" hold (settings changed from the keyboard).
+const TIMER_PEEK: usize = 6;
+const PREVIEW_DELAY_MS: u32 = 350;
+const PEEK_MS: u32 = 1200;
 /// Icons follow the pointer through a short animation, which also smooths the return.
 const FOLLOW_MS: u32 = 120;
 /// Pointer away this long before an auto-hiding dock slides out.
@@ -118,10 +130,19 @@ fn source_for(id: &AppIdentity) -> Option<String> {
 
 /// The Windows taskbar's own pins, used until the user changes pins in the dock.
 fn windows_pins() -> Vec<String> {
-    let Some(appdata) = std::env::var_os("APPDATA") else { return Vec::new() };
-    let dir = std::path::Path::new(&appdata).join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
+    let Some(appdata) = std::env::var_os("APPDATA") else {
+        return Vec::new();
+    };
+    let dir = std::path::Path::new(&appdata)
+        .join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
     let mut links: Vec<String> = std::fs::read_dir(dir)
-        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk"))).map(|p| p.to_string_lossy().into_owned()).collect())
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")))
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect()
+        })
         .unwrap_or_default();
     // ponytail: name order; the Windows taskbar's own order lives in an undocumented registry blob.
     links.sort_by_key(|p| p.to_lowercase());
@@ -141,15 +162,33 @@ pub fn entries(settings: &Settings) -> Vec<Entry> {
     let pins = settings.pins.clone().unwrap_or_else(windows_pins);
     let mut out: Vec<Entry> = pins
         .into_iter()
-        .filter_map(|p| Some(Entry { identity: appid::source_identity(&p)?, pin: Some(p.clone()), windows: Vec::new(), source: p }))
+        .filter_map(|p| {
+            Some(Entry {
+                identity: appid::source_identity(&p)?,
+                pin: Some(p.clone()),
+                windows: Vec::new(),
+                source: p,
+            })
+        })
         .collect();
-    for hwnd in winlist::enumerate().into_iter().rev().filter(|h| !winlist::is_own(*h)) {
-        let Some(identity) = appid::window_identity(hwnd) else { continue };
+    for hwnd in winlist::enumerate()
+        .into_iter()
+        .rev()
+        .filter(|h| !winlist::is_own(*h))
+    {
+        let Some(identity) = appid::window_identity(hwnd) else {
+            continue;
+        };
         match out.iter_mut().find(|e| e.identity.same_app(&identity)) {
             Some(e) => e.windows.push(hwnd),
             None => {
                 if let Some(source) = source_for(&identity) {
-                    out.push(Entry { identity, pin: None, windows: vec![hwnd], source });
+                    out.push(Entry {
+                        identity,
+                        pin: None,
+                        windows: vec![hwnd],
+                        source,
+                    });
                 }
             }
         }
@@ -166,6 +205,8 @@ struct Comp {
     backdrop: Backdrop,
     /// Implicit Offset/Scale/Size animations shared by icons, dots and the frame.
     follow: ImplicitAnimationCollection,
+    /// Empty collection: values apply at once while the pointer moves.
+    still: ImplicitAnimationCollection,
     shape: CompositionRoundedRectangleGeometry,
     items: ContainerVisual,
     dot_surface: CompositionDrawingSurface,
@@ -186,6 +227,12 @@ pub struct Dock {
     shown: Cell<bool>,
     /// Pointer x over the dock (DIPs from the resting dock's left edge) while magnifying.
     pointer: Cell<Option<f32>>,
+    /// Animate the next layout change (enter, leave, items); off while following the pointer.
+    smooth: Cell<bool>,
+    /// Item under the pointer (for previews).
+    hovered: Cell<Option<usize>>,
+    /// Settings window keeps the dock out.
+    held: Cell<bool>,
     tracking: Cell<bool>,
     registered: Cell<bool>,
     items: RefCell<Vec<Item>>,
@@ -210,6 +257,9 @@ impl Dock {
             palette: Cell::new(theme::system_palette()),
             shown: Cell::new(true),
             pointer: Cell::new(None),
+            smooth: Cell::new(true),
+            hovered: Cell::new(None),
+            held: Cell::new(false),
             tracking: Cell::new(false),
             registered: Cell::new(false),
             items: RefCell::new(Vec::new()),
@@ -237,7 +287,15 @@ impl Dock {
         }
         unsafe {
             _ = RegisterShellHookWindow(hwnd);
-            SetWinEventHook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, None, Some(on_cloak), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+            SetWinEventHook(
+                EVENT_OBJECT_CLOAKED,
+                EVENT_OBJECT_UNCLOAKED,
+                None,
+                Some(on_cloak),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            );
         }
         dock.relayout();
         if !hidden {
@@ -255,7 +313,9 @@ impl Dock {
     }
 
     fn geometry(&self) -> Geometry {
-        Geometry { icon: settings::get().dock_icon }
+        Geometry {
+            icon: settings::get().dock_icon,
+        }
     }
 
     fn autohide(&self) -> bool {
@@ -273,9 +333,18 @@ impl Dock {
         slide.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
         let anim = c.CreateVector3KeyFrameAnimation()?;
         anim.SetTarget(&HSTRING::from("Offset"))?;
-        let ease_out = c.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?;
-        anim.InsertExpressionKeyFrameWithEasingFunction(1.0, &HSTRING::from("this.FinalValue"), &ease_out)?;
-        anim.SetDuration(TimeSpan { Duration: SLIDE_MS as i64 * 10_000 })?;
+        let ease_out = c.CreateCubicBezierEasingFunction(
+            Vector2 { X: 0.2, Y: 0.0 },
+            Vector2 { X: 0.0, Y: 1.0 },
+        )?;
+        anim.InsertExpressionKeyFrameWithEasingFunction(
+            1.0,
+            &HSTRING::from("this.FinalValue"),
+            &ease_out,
+        )?;
+        anim.SetDuration(TimeSpan {
+            Duration: SLIDE_MS as i64 * 10_000,
+        })?;
         let implicit = c.CreateImplicitAnimationCollection()?;
         implicit.Insert(&HSTRING::from("Offset"), &anim)?;
         slide.SetImplicitAnimations(&implicit)?;
@@ -300,7 +369,19 @@ impl Dock {
         root.Children()?.InsertAtTop(&slide)?;
         target.SetRoot(&root)?;
         backdrop.apply(self.palette.get().bar);
-        *self.comp.borrow_mut() = Some(Comp { _target: target, slide, frame, backdrop, follow, shape, items, dot_surface, dot_brush });
+        let still = c.CreateImplicitAnimationCollection()?;
+        *self.comp.borrow_mut() = Some(Comp {
+            _target: target,
+            slide,
+            frame,
+            backdrop,
+            follow,
+            still,
+            shape,
+            items,
+            dot_surface,
+            dot_brush,
+        });
         Ok(())
     }
 
@@ -321,7 +402,10 @@ impl Dock {
 
     /// Screen strip the resting dock needs (what the AppBar reserves).
     fn thickness_px(&self) -> i32 {
-        theme::px(self.geometry().height() + theme::DOCK_MARGIN, self.dpi.get())
+        theme::px(
+            self.geometry().height() + theme::DOCK_MARGIN,
+            self.dpi.get(),
+        )
     }
 
     /// Room around the resting dock for magnified icons (DIPs): (each side, above).
@@ -362,11 +446,28 @@ impl Dock {
         let h = self.thickness_px() + (above * s).round() as i32;
         let strip = self.strip.get();
         let x = (strip.left + strip.right) / 2 - w / 2;
-        unsafe { _ = SetWindowPos(self.hwnd.get(), Some(HWND_TOPMOST), x, strip.bottom - h, w, h, SWP_NOACTIVATE) };
+        unsafe {
+            _ = SetWindowPos(
+                self.hwnd.get(),
+                Some(HWND_TOPMOST),
+                x,
+                strip.bottom - h,
+                w,
+                h,
+                SWP_NOACTIVATE,
+            )
+        };
         self.size.set((w, h));
         if let Some(c) = self.comp.borrow().as_ref() {
-            _ = c.items.SetOffset(Vector3 { X: (side * s).round(), Y: (above * s).round(), Z: 0.0 });
-            _ = c.shape.SetCornerRadius(Vector2 { X: g.radius() * s, Y: g.radius() * s });
+            _ = c.items.SetOffset(Vector3 {
+                X: (side * s).round(),
+                Y: (above * s).round(),
+                Z: 0.0,
+            });
+            _ = c.shape.SetCornerRadius(Vector2 {
+                X: g.radius() * s,
+                Y: g.radius() * s,
+            });
         }
         self.position_items();
         self.update_region();
@@ -378,28 +479,69 @@ impl Dock {
         let s = self.scale();
         let g = self.geometry();
         let items = self.items.borrow();
-        let l = magnify::layout(g, items.len(), self.pointer.get(), settings::get().dock_magnify);
+        let l = magnify::layout(
+            g,
+            items.len(),
+            self.pointer.get(),
+            settings::get().dock_magnify,
+        );
         let comp = self.comp.borrow();
         let Some(c) = comp.as_ref() else { return };
         let (side, above) = self.headroom();
-        let frame = Vector2 { X: ((l.right - l.left) * s).round(), Y: (g.height() * s).round() };
-        _ = c.frame.SetOffset(Vector3 { X: ((side + l.left) * s).round(), Y: (above * s).round(), Z: 0.0 });
+        let frame = Vector2 {
+            X: ((l.right - l.left) * s).round(),
+            Y: (g.height() * s).round(),
+        };
+        _ = c.frame.SetOffset(Vector3 {
+            X: ((side + l.left) * s).round(),
+            Y: (above * s).round(),
+            Z: 0.0,
+        });
         _ = c.frame.SetSize(frame);
         _ = c.shape.SetSize(frame);
-        let icon = (g.icon * s).round();
-        let dot = theme::DOCK_DOT * s;
+        // Even pixel sizes so icon and dot share one exact centre line.
+        let even = |v: f32| ((v / 2.0).round() * 2.0).max(2.0);
+        let icon = even(g.icon * s);
+        let dot = even(theme::DOCK_DOT * s);
         let dot_y = ((g.pad() + g.icon + (g.pad_bottom() - theme::DOCK_DOT) / 2.0) * s).round();
         let indicators = settings::get().dock_indicators;
+        let anims = if self.smooth.get() {
+            &c.follow
+        } else {
+            &c.still
+        };
+        _ = c.frame.SetImplicitAnimations(anims);
+        _ = c.shape.SetImplicitAnimations(anims);
         for (item, (left, k)) in items.iter().zip(&l.items) {
-            let centre = (left + g.icon * k / 2.0) * s;
+            let centre = ((left + g.icon * k / 2.0) * s).round();
+            _ = item.icon.SetImplicitAnimations(anims);
+            _ = item.dot.SetImplicitAnimations(anims);
             // Scale grows up from the bottom centre, like the macOS dock.
             _ = item.icon.SetSize(Vector2 { X: icon, Y: icon });
-            _ = item.icon.SetCenterPoint(Vector3 { X: icon / 2.0, Y: icon, Z: 0.0 });
-            _ = item.icon.SetScale(Vector3 { X: *k, Y: *k, Z: 1.0 });
-            _ = item.icon.SetOffset(Vector3 { X: centre - icon / 2.0, Y: (g.pad() * s).round(), Z: 0.0 });
+            _ = item.icon.SetCenterPoint(Vector3 {
+                X: icon / 2.0,
+                Y: icon,
+                Z: 0.0,
+            });
+            _ = item.icon.SetScale(Vector3 {
+                X: *k,
+                Y: *k,
+                Z: 1.0,
+            });
+            _ = item.icon.SetOffset(Vector3 {
+                X: centre - icon / 2.0,
+                Y: (g.pad() * s).round(),
+                Z: 0.0,
+            });
             _ = item.dot.SetSize(Vector2 { X: dot, Y: dot });
-            _ = item.dot.SetOffset(Vector3 { X: (centre - dot / 2.0).round(), Y: dot_y, Z: 0.0 });
-            _ = item.dot.SetIsVisible(indicators && !item.windows.is_empty());
+            _ = item.dot.SetOffset(Vector3 {
+                X: centre - dot / 2.0,
+                Y: dot_y,
+                Z: 0.0,
+            });
+            _ = item
+                .dot
+                .SetIsVisible(indicators && !item.windows.is_empty());
         }
     }
 
@@ -414,11 +556,19 @@ impl Dock {
         let right = w - left;
         unsafe {
             if !self.shown.get() {
-                SetWindowRgn(self.hwnd.get(), Some(CreateRectRgn(left, h - TRIGGER_PX, right, h)), true);
+                SetWindowRgn(
+                    self.hwnd.get(),
+                    Some(CreateRectRgn(left, h - TRIGGER_PX, right, h)),
+                    true,
+                );
             } else if self.pointer.get().is_some() {
                 SetWindowRgn(self.hwnd.get(), None, true);
             } else {
-                SetWindowRgn(self.hwnd.get(), Some(CreateRectRgn(left, h - self.thickness_px(), right, h)), true);
+                SetWindowRgn(
+                    self.hwnd.get(),
+                    Some(CreateRectRgn(left, h - self.thickness_px(), right, h)),
+                    true,
+                );
             }
         }
     }
@@ -433,7 +583,11 @@ impl Dock {
     fn slide_to(&self, out: bool) {
         let y = if out { self.size.get().1 as f32 } else { 0.0 };
         if let Some(c) = self.comp.borrow().as_ref() {
-            _ = c.slide.SetOffset(Vector3 { X: 0.0, Y: y, Z: 0.0 });
+            _ = c.slide.SetOffset(Vector3 {
+                X: 0.0,
+                Y: y,
+                Z: 0.0,
+            });
         }
     }
 
@@ -455,7 +609,12 @@ impl Dock {
 
     fn on_mouse_move(&self, x_px: i32) {
         if !self.tracking.replace(true) {
-            let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: self.hwnd.get(), dwHoverTime: 0 };
+            let mut t = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: self.hwnd.get(),
+                dwHoverTime: 0,
+            };
             unsafe { _ = TrackMouseEvent(&mut t) };
         }
         unsafe { _ = KillTimer(Some(self.hwnd.get()), TIMER_HIDE) };
@@ -463,36 +622,129 @@ impl Dock {
             self.slide_in();
             return;
         }
+        self.track_preview(x_px);
         if settings::get().dock_magnify <= 1.0 {
             return;
         }
         // Magnify while the pointer is over the dock's current extent.
         let x = self.dock_x(x_px);
         let g = self.geometry();
-        let l = magnify::layout(g, self.items.borrow().len(), self.pointer.get(), settings::get().dock_magnify);
+        let l = magnify::layout(
+            g,
+            self.items.borrow().len(),
+            self.pointer.get(),
+            settings::get().dock_magnify,
+        );
         if x < l.left || x >= l.right {
             return self.rest();
         }
         let first = self.pointer.replace(Some(x)).is_none();
         unsafe { _ = KillTimer(Some(self.hwnd.get()), TIMER_REST) };
         if first {
+            // Grow in with the animation, then follow the pointer directly (no restarts, no lag).
+            self.smooth.set(true);
+            unsafe { SetTimer(Some(self.hwnd.get()), TIMER_FOLLOW, FOLLOW_MS, None) };
             self.update_region();
         }
         self.position_items();
     }
 
+    // ---- hover previews ----
+
+    fn track_preview(&self, x_px: i32) {
+        let item = self.item_at(x_px);
+        if item == self.hovered.get() {
+            return;
+        }
+        self.hovered.set(item);
+        unsafe { _ = KillTimer(Some(self.hwnd.get()), TIMER_PREVIEW) };
+        match item {
+            // Already showing one: follow the pointer at once, like the Windows taskbar.
+            Some(i) if preview::visible() => self.show_preview(i),
+            Some(_) => unsafe {
+                _ = SetTimer(Some(self.hwnd.get()), TIMER_PREVIEW, PREVIEW_DELAY_MS, None)
+            },
+            None => preview::hide_soon(),
+        }
+    }
+
+    fn show_preview(&self, i: usize) {
+        let s = self.scale();
+        let g = self.geometry();
+        let (windows, source) = {
+            let items = self.items.borrow();
+            let Some(item) = items.get(i) else { return };
+            (
+                item.windows.clone(),
+                item.pin.clone().unwrap_or_else(|| item.source.clone()),
+            )
+        };
+        let l = magnify::layout(
+            g,
+            self.items.borrow().len(),
+            self.pointer.get(),
+            settings::get().dock_magnify,
+        );
+        let Some((left, k)) = l.items.get(i).copied() else {
+            return;
+        };
+        let (side, above) = self.headroom();
+        let mut rc = RECT::default();
+        unsafe { _ = GetWindowRect(self.hwnd.get(), &mut rc) };
+        let centre = rc.left + ((side + left + g.icon * k / 2.0) * s).round() as i32;
+        let icon_top = rc.top + ((above + g.pad() + g.icon * (1.0 - k)) * s).round() as i32;
+        let name = if windows.is_empty() {
+            appid::source_name(&source)
+        } else {
+            String::new()
+        };
+        preview::show(&windows, &name, centre, icon_top - (8.0 * s) as i32);
+    }
+
     /// Back to resting size; the region shrinks once the icons have settled.
     fn rest(&self) {
         if self.pointer.take().is_some() {
+            self.smooth.set(true);
             self.position_items();
             unsafe { SetTimer(Some(self.hwnd.get()), TIMER_REST, FOLLOW_MS + 60, None) };
         }
     }
 
+    /// Settings window: keep the dock out so size changes are visible.
+    fn hold(&self, how: usize) {
+        let hwnd = self.hwnd.get();
+        unsafe {
+            _ = KillTimer(Some(hwnd), TIMER_PEEK);
+            match how {
+                // Release waits for an open menu to close.
+                0 if menu::visible() => _ = SetTimer(Some(hwnd), TIMER_PEEK, 300, None),
+                0 => {
+                    self.held.set(false);
+                    if self.autohide() && !popup::pointer_in(hwnd) {
+                        SetTimer(Some(hwnd), TIMER_HIDE, HIDE_DELAY_MS, None);
+                    }
+                }
+                _ => {
+                    self.held.set(true);
+                    _ = KillTimer(Some(hwnd), TIMER_HIDE);
+                    if !self.shown.get() {
+                        self.slide_in();
+                    }
+                    if how == 2 {
+                        SetTimer(Some(hwnd), TIMER_PEEK, PEEK_MS, None);
+                    }
+                }
+            }
+        }
+    }
+
     fn on_mouse_leave(&self) {
         self.tracking.set(false);
+        self.hovered.set(None);
+        unsafe { _ = KillTimer(Some(self.hwnd.get()), TIMER_PREVIEW) };
+        preview::hide_soon();
         self.rest();
-        if self.autohide() && self.shown.get() {
+        if self.autohide() && self.shown.get() && !self.held.get() {
             unsafe { SetTimer(Some(self.hwnd.get()), TIMER_HIDE, HIDE_DELAY_MS, None) };
         }
     }
@@ -510,7 +762,14 @@ impl Dock {
             self.gfx.draw(&c.dot_surface, s, |dc| unsafe {
                 let brush = dc.CreateSolidColorBrush(&color.d2d(), None)?;
                 let r = theme::DOCK_DOT / 2.0;
-                dc.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: r, Y: r }, radiusX: r, radiusY: r }, &brush);
+                dc.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 { X: r, Y: r },
+                        radiusX: r,
+                        radiusY: r,
+                    },
+                    &brush,
+                );
                 Ok(())
             })
         });
@@ -519,7 +778,12 @@ impl Dock {
         }
     }
 
-    fn add_item(&self, identity: AppIdentity, pin: Option<String>, source: String) -> Option<usize> {
+    fn add_item(
+        &self,
+        identity: AppIdentity,
+        pin: Option<String>,
+        source: String,
+    ) -> Option<usize> {
         let comp = self.comp.borrow();
         let c = comp.as_ref()?;
         let compositor = &self.gfx.compositor;
@@ -533,7 +797,14 @@ impl Dock {
         drop(comp);
         self.set_icon(&icon, &source);
         let mut items = self.items.borrow_mut();
-        items.push(Item { identity, pin, windows: Vec::new(), source, icon, dot });
+        items.push(Item {
+            identity,
+            pin,
+            windows: Vec::new(),
+            source,
+            icon,
+            dot,
+        });
         Some(items.len() - 1)
     }
 
@@ -555,7 +826,10 @@ impl Dock {
         if self.requested.borrow_mut().insert(source.to_string())
             && let Some(loader) = self.loader.borrow().as_ref()
         {
-            loader.request(source, (settings::DOCK_ICON_MAX * settings::MAGNIFY_MAX * self.scale()).round() as u32);
+            loader.request(
+                source,
+                (settings::DOCK_ICON_MAX * settings::MAGNIFY_MAX * self.scale()).round() as u32,
+            );
         }
     }
 
@@ -568,7 +842,12 @@ impl Dock {
             Ok(b) => b,
             Err(e) => return log::error(&format!("icon surface: {e}")),
         };
-        for item in self.items.borrow().iter().filter(|i| i.source == icon.source) {
+        for item in self
+            .items
+            .borrow()
+            .iter()
+            .filter(|i| i.source == icon.source)
+        {
             _ = item.icon.SetBrush(&brush);
         }
         self.brushes.borrow_mut().insert(icon.source.clone(), brush);
@@ -578,33 +857,67 @@ impl Dock {
         let surface = self.gfx.surface(icon.size, icon.size)?;
         self.gfx.draw(&surface, 1.0, |dc| unsafe {
             let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
                 dpiX: 96.0,
                 dpiY: 96.0,
                 ..Default::default()
             };
-            let bmp = dc.CreateBitmap(D2D_SIZE_U { width: icon.size, height: icon.size }, Some(icon.pixels.as_ptr() as *const _), icon.size * 4, &props)?;
+            let bmp = dc.CreateBitmap(
+                D2D_SIZE_U {
+                    width: icon.size,
+                    height: icon.size,
+                },
+                Some(icon.pixels.as_ptr() as *const _),
+                icon.size * 4,
+                &props,
+            )?;
             let side = icon.size as f32;
-            dc.DrawBitmap(&bmp, Some(&D2D_RECT_F { left: 0.0, top: 0.0, right: side, bottom: side }), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            dc.DrawBitmap(
+                &bmp,
+                Some(&D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: side,
+                    bottom: side,
+                }),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
             Ok(())
         })?;
         self.gfx.compositor.CreateSurfaceBrushWithSurface(&surface)
     }
 
     fn tracks(&self, hwnd: HWND) -> bool {
-        self.items.borrow().iter().any(|i| i.windows.contains(&hwnd))
+        self.items
+            .borrow()
+            .iter()
+            .any(|i| i.windows.contains(&hwnd))
     }
 
     fn add_window(&self, hwnd: HWND) {
         if self.tracks(hwnd) || !winlist::qualifies(hwnd) || winlist::is_own(hwnd) {
             return;
         }
-        let Some(identity) = appid::window_identity(hwnd) else { return };
-        let found = self.items.borrow().iter().position(|i| i.identity.same_app(&identity));
+        let Some(identity) = appid::window_identity(hwnd) else {
+            return;
+        };
+        let found = self
+            .items
+            .borrow()
+            .iter()
+            .position(|i| i.identity.same_app(&identity));
         let index = match found {
             Some(i) => i,
             None => {
-                let Some(source) = source_for(&identity) else { return };
+                let Some(source) = source_for(&identity) else {
+                    return;
+                };
                 match self.add_item(identity, None, source) {
                     Some(i) => i,
                     None => return,
@@ -619,7 +932,11 @@ impl Dock {
         for item in self.items.borrow_mut().iter_mut() {
             item.windows.retain(|w| *w != hwnd);
         }
-        let empty = self.items.borrow().iter().position(|i| i.pin.is_none() && i.windows.is_empty());
+        let empty = self
+            .items
+            .borrow()
+            .iter()
+            .position(|i| i.pin.is_none() && i.windows.is_empty());
         if let Some(i) = empty {
             self.remove_item(i);
         }
@@ -628,8 +945,13 @@ impl Dock {
 
     fn on_shell(&self, event: ShellEvent) {
         match event {
-            ShellEvent::Created(h) | ShellEvent::Activated(h) | ShellEvent::Redraw(h) => self.add_window(h),
-            ShellEvent::Destroyed(h) | ShellEvent::Replaced(h) => self.remove_window(h),
+            ShellEvent::Created(h) | ShellEvent::Activated(h) | ShellEvent::Redraw(h) => {
+                self.add_window(h)
+            }
+            ShellEvent::Destroyed(h) | ShellEvent::Replaced(h) => {
+                preview::forget(h);
+                self.remove_window(h);
+            }
             ShellEvent::Flash(_) | ShellEvent::Other => {}
         }
     }
@@ -644,7 +966,12 @@ impl Dock {
 
     fn item_at(&self, x_px: i32) -> Option<usize> {
         let g = self.geometry();
-        let l = magnify::layout(g, self.items.borrow().len(), self.pointer.get(), settings::get().dock_magnify);
+        let l = magnify::layout(
+            g,
+            self.items.borrow().len(),
+            self.pointer.get(),
+            settings::get().dock_magnify,
+        );
         magnify::hit(g, &l, self.dock_x(x_px))
     }
 
@@ -655,10 +982,22 @@ impl Dock {
         let (windows, launch) = {
             let items = self.items.borrow();
             let item = &items[i];
-            (item.windows.clone(), item.pin.clone().unwrap_or_else(|| item.source.clone()))
+            (
+                item.windows.clone(),
+                item.pin.clone().unwrap_or_else(|| item.source.clone()),
+            )
         };
         if windows.is_empty() || new_instance {
-            unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(launch), None, None, SW_SHOWNORMAL) };
+            unsafe {
+                ShellExecuteW(
+                    None,
+                    w!("open"),
+                    &HSTRING::from(launch),
+                    None,
+                    None,
+                    SW_SHOWNORMAL,
+                )
+            };
             return;
         }
         let fg = unsafe { GetForegroundWindow() };
@@ -680,65 +1019,181 @@ impl Dock {
 
     // ---- context menu ----
 
+    /// Right click: Windows taskbar choices in a macOS style menu. On an app:
+    /// its windows (checked = in front), new window, keep/remove, file location,
+    /// close. On the dock itself: hiding, magnification, settings.
     fn context_menu(&self, x_px: i32) {
-        const KEEP: usize = 1;
-        const CLOSE: usize = 2;
-        const AUTOHIDE: usize = 3;
-        const SETTINGS: usize = 4;
+        const NEW: u32 = 1;
+        const KEEP: u32 = 2;
+        const LOCATION: u32 = 3;
+        const CLOSE: u32 = 4;
+        const AUTOHIDE: u32 = 5;
+        const MAGNIFY: u32 = 6;
+        const SETTINGS: u32 = 7;
+        const WINDOW: u32 = 100;
+        preview::hide();
         let index = self.item_at(x_px);
-        let (pinned, windows) = index.map_or((false, Vec::new()), |i| {
-            let items = self.items.borrow();
-            (items[i].pin.is_some(), items[i].windows.clone())
-        });
-        let autohide = self.autohide();
-
-        let chosen = unsafe {
-            let Ok(menu) = CreatePopupMenu() else { return };
-            if index.is_some() {
-                _ = AppendMenuW(menu, MF_STRING, KEEP, if pinned { w!("Dock'tan kaldır") } else { w!("Dock'ta tut") });
-                if !windows.is_empty() {
-                    _ = AppendMenuW(menu, MF_STRING, CLOSE, if windows.len() > 1 { w!("Tüm pencereleri kapat") } else { w!("Kapat") });
-                }
-                _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let mut entries = Vec::new();
+        let (windows, launch, exe) = match index {
+            Some(i) => {
+                let items = self.items.borrow();
+                let item = &items[i];
+                let launch = item.pin.clone().unwrap_or_else(|| item.source.clone());
+                (
+                    item.windows.clone(),
+                    Some((launch, item.pin.is_some())),
+                    item.identity.exe.clone(),
+                )
             }
-            // macOS wording: the menu names the action, settings hold the rest.
-            _ = AppendMenuW(menu, MF_STRING, AUTOHIDE, if autohide { w!("Gizlemeyi kapat") } else { w!("Gizlemeyi aç") });
-            _ = AppendMenuW(menu, MF_STRING, SETTINGS, w!("Dock ayarları…"));
-
-            let mut pt = POINT::default();
-            _ = GetCursorPos(&mut pt);
-            _ = SetForegroundWindow(self.hwnd.get()); // or the menu does not close on an outside click
-            let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_CENTERALIGN, pt.x, pt.y, None, self.hwnd.get(), None);
-            _ = PostMessageW(Some(self.hwnd.get()), WM_NULL, WPARAM(0), LPARAM(0));
-            _ = DestroyMenu(menu);
-            cmd.0 as usize
+            None => (Vec::new(), None, None),
         };
+        if let Some((launch, pinned)) = &launch {
+            let fg = unsafe { GetForegroundWindow() };
+            for (n, w) in windows.iter().enumerate() {
+                let mut buf = [0u16; 256];
+                let len = unsafe { GetWindowTextW(*w, &mut buf) } as usize;
+                let title = String::from_utf16_lossy(&buf[..len]);
+                entries.push(menu::Entry::Item {
+                    id: WINDOW + n as u32,
+                    label: if title.is_empty() {
+                        "Pencere".into()
+                    } else {
+                        title
+                    },
+                    checked: *w == fg,
+                });
+            }
+            if !windows.is_empty() {
+                entries.push(menu::Entry::Separator);
+            }
+            entries.push(menu::Entry::item(NEW, appid::source_name(launch)));
+            entries.push(menu::Entry::item(
+                KEEP,
+                if *pinned {
+                    "Dock'tan kaldır"
+                } else {
+                    "Dock'ta tut"
+                },
+            ));
+            if exe.is_some() {
+                entries.push(menu::Entry::item(LOCATION, "Dosya konumunu aç"));
+            }
+            if !windows.is_empty() {
+                entries.push(menu::Entry::Separator);
+                entries.push(menu::Entry::item(
+                    CLOSE,
+                    if windows.len() > 1 {
+                        "Tüm pencereleri kapat"
+                    } else {
+                        "Pencereyi kapat"
+                    },
+                ));
+            }
+        } else {
+            let st = settings::get();
+            entries.push(menu::Entry::item(
+                AUTOHIDE,
+                if st.dock_autohide {
+                    "Gizlemeyi kapat"
+                } else {
+                    "Gizlemeyi aç"
+                },
+            ));
+            entries.push(menu::Entry::item(
+                MAGNIFY,
+                if st.dock_magnify > 1.0 {
+                    "Büyütmeyi kapat"
+                } else {
+                    "Büyütmeyi aç"
+                },
+            ));
+            entries.push(menu::Entry::Separator);
+            entries.push(menu::Entry::item(SETTINGS, "Dock ayarları…"));
+        }
 
-        match chosen {
+        // Anchor above the icon (or the pointer on the dock itself).
+        let s = self.scale();
+        let g = self.geometry();
+        let mut rc = RECT::default();
+        let mut pt = POINT::default();
+        unsafe {
+            _ = GetWindowRect(self.hwnd.get(), &mut rc);
+            _ = GetCursorPos(&mut pt);
+        }
+        let (side, above) = self.headroom();
+        let anchor_x = index
+            .and_then(|i| {
+                let l = magnify::layout(
+                    g,
+                    self.items.borrow().len(),
+                    self.pointer.get(),
+                    settings::get().dock_magnify,
+                );
+                l.items.get(i).map(|(left, k)| {
+                    rc.left + ((side + left + g.icon * k / 2.0) * s).round() as i32
+                })
+            })
+            .unwrap_or(pt.x);
+        let anchor_bottom = rc.top + ((above - 6.0) * s).round() as i32;
+        self.hold(1); // stay out while the menu is open
+        let dock: &'static Dock = unsafe { &*(self as *const Dock) };
+        menu::show(entries, anchor_x, anchor_bottom, move |id| match id {
+            NEW => {
+                if let Some((launch, _)) = &launch {
+                    unsafe {
+                        ShellExecuteW(
+                            None,
+                            w!("open"),
+                            &HSTRING::from(launch.as_str()),
+                            None,
+                            None,
+                            SW_SHOWNORMAL,
+                        )
+                    };
+                }
+            }
             KEEP => {
                 if let Some(i) = index {
-                    self.toggle_pin(i);
+                    dock.toggle_pin(i);
                 }
             }
-            CLOSE => windows.iter().for_each(|w| unsafe { _ = PostMessageW(Some(*w), WM_CLOSE, WPARAM(0), LPARAM(0)) }),
+            LOCATION => {
+                if let Some(exe) = &exe {
+                    let args = HSTRING::from(format!("/select,\"{exe}\""));
+                    unsafe {
+                        ShellExecuteW(
+                            None,
+                            w!("open"),
+                            w!("explorer.exe"),
+                            &args,
+                            None,
+                            SW_SHOWNORMAL,
+                        )
+                    };
+                }
+            }
+            CLOSE => windows.iter().for_each(|w| unsafe {
+                _ = PostMessageW(Some(*w), WM_CLOSE, WPARAM(0), LPARAM(0))
+            }),
             AUTOHIDE => settings::update(|st| st.dock_autohide = !st.dock_autohide),
+            MAGNIFY => settings::update(|st| {
+                st.dock_magnify = if st.dock_magnify > 1.0 { 1.0 } else { 1.5 }
+            }),
             SETTINGS => crate::prefs::open(),
+            n if n >= WINDOW => {
+                if let Some(&w) = windows.get((n - WINDOW) as usize) {
+                    unsafe {
+                        if IsIconic(w).as_bool() {
+                            _ = ShowWindow(w, SW_RESTORE);
+                        }
+                        _ = SetForegroundWindow(w);
+                    }
+                }
+            }
             _ => {}
-        }
-        // The menu swallowed the mouse-leave; hide again if the pointer went elsewhere.
-        if self.autohide() && !self.pointer_inside() {
-            self.on_mouse_leave();
-        }
-    }
-
-    fn pointer_inside(&self) -> bool {
-        let mut pt = POINT::default();
-        let mut rc = RECT::default();
-        unsafe {
-            _ = GetCursorPos(&mut pt);
-            _ = GetWindowRect(self.hwnd.get(), &mut rc);
-        }
-        pt.x >= rc.left && pt.x < rc.right && pt.y >= rc.top && pt.y < rc.bottom
+        });
+        // The menu closes on its own; release the hold once it is gone.
+        unsafe { SetTimer(Some(self.hwnd.get()), TIMER_PEEK, PEEK_MS, None) };
     }
 
     /// Keeps or removes the app at `index`; the first change copies the
@@ -746,7 +1201,11 @@ impl Dock {
     fn toggle_pin(&self, index: usize) {
         let (pin, source, windows_empty) = {
             let items = self.items.borrow();
-            (items[index].pin.clone(), items[index].source.clone(), items[index].windows.is_empty())
+            (
+                items[index].pin.clone(),
+                items[index].source.clone(),
+                items[index].windows.is_empty(),
+            )
         };
         match pin {
             Some(_) => {
@@ -757,14 +1216,28 @@ impl Dock {
             }
             None => self.items.borrow_mut()[index].pin = Some(source),
         }
-        let pins: Vec<String> = self.items.borrow().iter().filter_map(|i| i.pin.clone()).collect();
+        let pins: Vec<String> = self
+            .items
+            .borrow()
+            .iter()
+            .filter_map(|i| i.pin.clone())
+            .collect();
         settings::update(|st| st.pins = Some(pins));
     }
 
     /// Follows a settings change (from the menu or the settings window).
     pub fn apply(&self, before: &Settings, after: &Settings) {
-        let layout = (after.dock_icon, after.dock_autohide, after.dock_indicators, after.dock_magnify)
-            != (before.dock_icon, before.dock_autohide, before.dock_indicators, before.dock_magnify);
+        let layout = (
+            after.dock_icon,
+            after.dock_autohide,
+            after.dock_indicators,
+            after.dock_magnify,
+        ) != (
+            before.dock_icon,
+            before.dock_autohide,
+            before.dock_indicators,
+            before.dock_magnify,
+        );
         if !layout {
             return;
         }
@@ -803,22 +1276,49 @@ impl Handler for Dock {
             WM_MOUSELEAVE => self.on_mouse_leave(),
             WM_TIMER if wp.0 == TIMER_HIDE => unsafe {
                 _ = KillTimer(Some(hwnd), TIMER_HIDE);
-                if self.autohide() {
+                // Not while its menu or preview is in use.
+                if self.autohide()
+                    && !self.held.get()
+                    && !menu::visible()
+                    && !preview::visible()
+                    && !popup::pointer_in(hwnd)
+                {
                     self.slide_out();
                 }
             },
+            WM_TIMER if wp.0 == TIMER_FOLLOW => {
+                unsafe { _ = KillTimer(Some(hwnd), TIMER_FOLLOW) };
+                self.smooth.set(self.pointer.get().is_none());
+            }
+            WM_TIMER if wp.0 == TIMER_PREVIEW => {
+                unsafe { _ = KillTimer(Some(hwnd), TIMER_PREVIEW) };
+                if let Some(i) = self.hovered.get() {
+                    self.show_preview(i);
+                }
+            }
+            WM_TIMER if wp.0 == TIMER_PEEK => self.hold(0),
+            WM_HOLD => self.hold(wp.0),
             WM_TIMER if wp.0 == TIMER_REGION || wp.0 == TIMER_REST => {
                 unsafe { _ = KillTimer(Some(hwnd), wp.0) };
                 self.update_region();
             }
-            WM_LBUTTONUP => self.click(x(), false),
-            WM_MBUTTONUP => self.click(x(), true),
+            WM_LBUTTONUP => {
+                preview::hide();
+                self.click(x(), false);
+            }
+            WM_MBUTTONUP => {
+                preview::hide();
+                self.click(x(), true);
+            }
             WM_RBUTTONUP => self.context_menu(x()),
             WM_MOUSEACTIVATE => return Some(LRESULT(MA_NOACTIVATE as isize)),
             WM_APPBAR if wp.0 as u32 == ABN_POSCHANGED => self.place(),
             WM_DPICHANGED | WM_DISPLAYCHANGE => self.place(),
             WM_SETTINGCHANGE => {
-                if lp.0 == 0 || unsafe { PCWSTR(lp.0 as *const u16).to_string() }.unwrap_or_default() != "ImmersiveColorSet" {
+                if lp.0 == 0
+                    || unsafe { PCWSTR(lp.0 as *const u16).to_string() }.unwrap_or_default()
+                        != "ImmersiveColorSet"
+                {
                     return None;
                 }
                 self.refresh_palette();
@@ -848,13 +1348,20 @@ impl Handler for Dock {
 /// Short ease-out on Offset, Scale and Size: icons follow the pointer smoothly
 /// and settle back when it leaves.
 fn follow_animations(c: &Compositor) -> Result<ImplicitAnimationCollection> {
-    let ease = c.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?;
+    let ease =
+        c.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?;
     let set = c.CreateImplicitAnimationCollection()?;
-    let duration = TimeSpan { Duration: FOLLOW_MS as i64 * 10_000 };
+    let duration = TimeSpan {
+        Duration: FOLLOW_MS as i64 * 10_000,
+    };
     for prop in ["Offset", "Scale"] {
         let a = c.CreateVector3KeyFrameAnimation()?;
         a.SetTarget(&HSTRING::from(prop))?;
-        a.InsertExpressionKeyFrameWithEasingFunction(1.0, &HSTRING::from("this.FinalValue"), &ease)?;
+        a.InsertExpressionKeyFrameWithEasingFunction(
+            1.0,
+            &HSTRING::from("this.FinalValue"),
+            &ease,
+        )?;
         a.SetDuration(duration)?;
         set.Insert(&HSTRING::from(prop), &a)?;
     }
@@ -866,9 +1373,24 @@ fn follow_animations(c: &Compositor) -> Result<ImplicitAnimationCollection> {
     Ok(set)
 }
 
-unsafe extern "system" fn on_cloak(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, _: i32, _: u32, _: u32) {
+unsafe extern "system" fn on_cloak(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _: i32,
+    _: u32,
+    _: u32,
+) {
     if id_object == OBJID_WINDOW.0 && !hwnd.is_invalid() {
-        unsafe { _ = PostMessageW(Some(DOCK_HWND.get()), WM_RECHECK, WPARAM(hwnd.0 as usize), LPARAM(0)) };
+        unsafe {
+            _ = PostMessageW(
+                Some(DOCK_HWND.get()),
+                WM_RECHECK,
+                WPARAM(hwnd.0 as usize),
+                LPARAM(0),
+            )
+        };
     }
 }
 
@@ -880,7 +1402,10 @@ mod tests {
 
     #[test]
     fn geometry_scales_with_icon_size() {
-        assert_eq!((G.pad(), G.pad_bottom(), G.height(), G.radius()), (6.0, 10.0, 64.0, 18.0));
+        assert_eq!(
+            (G.pad(), G.pad_bottom(), G.height(), G.radius()),
+            (6.0, 10.0, 64.0, 18.0)
+        );
         let small = Geometry { icon: 32.0 };
         assert_eq!((small.pad(), small.height()), (4.0, 44.0));
         let big = Geometry { icon: 64.0 };
@@ -896,10 +1421,22 @@ mod tests {
 
     #[test]
     fn icon_source_prefers_package_then_exe() {
-        let id = |a: Option<&str>, e: Option<&str>| AppIdentity { aumid: a.map(Into::into), exe: e.map(Into::into) };
-        assert_eq!(source_for(&id(Some("Pkg_x!App"), Some("c:/x.exe"))).unwrap(), r"shell:AppsFolder\Pkg_x!App");
-        assert_eq!(source_for(&id(Some("Brave"), Some("c:/brave.exe"))).unwrap(), "c:/brave.exe");
-        assert_eq!(source_for(&id(Some("Microsoft.Windows.Explorer"), None)).unwrap(), r"shell:AppsFolder\Microsoft.Windows.Explorer");
+        let id = |a: Option<&str>, e: Option<&str>| AppIdentity {
+            aumid: a.map(Into::into),
+            exe: e.map(Into::into),
+        };
+        assert_eq!(
+            source_for(&id(Some("Pkg_x!App"), Some("c:/x.exe"))).unwrap(),
+            r"shell:AppsFolder\Pkg_x!App"
+        );
+        assert_eq!(
+            source_for(&id(Some("Brave"), Some("c:/brave.exe"))).unwrap(),
+            "c:/brave.exe"
+        );
+        assert_eq!(
+            source_for(&id(Some("Microsoft.Windows.Explorer"), None)).unwrap(),
+            r"shell:AppsFolder\Microsoft.Windows.Explorer"
+        );
         assert!(source_for(&id(None, None)).is_none());
     }
 }

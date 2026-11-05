@@ -15,8 +15,8 @@ use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
 use crate::gfx::{self, Gfx, Label};
-use crate::theme::{self, Palette};
 use crate::status::{self, Icon, Sources};
+use crate::theme::{self, Palette};
 use crate::window::{self, Backdrop, Handler};
 use crate::{appbar, appid, clock, log};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
@@ -44,11 +44,36 @@ pub struct Fonts {
 impl Fonts {
     pub fn new(dwrite: &IDWriteFactory) -> Result<Self> {
         Ok(Self {
-            text: gfx::text_format(dwrite, theme::TEXT_FONT, theme::TEXT_SIZE, DWRITE_FONT_WEIGHT_REGULAR)?,
-            bold: gfx::text_format(dwrite, theme::TEXT_FONT, theme::TEXT_SIZE, DWRITE_FONT_WEIGHT_BOLD)?,
-            icons: gfx::text_format(dwrite, theme::ICON_FONT, theme::ICON_SIZE, DWRITE_FONT_WEIGHT_REGULAR)?,
-            icons_small: gfx::text_format(dwrite, theme::ICON_FONT, theme::ICON_SIZE_SMALL, DWRITE_FONT_WEIGHT_REGULAR)?,
-            icons_large: gfx::text_format(dwrite, theme::ICON_FONT, theme::ICON_SIZE_LARGE, DWRITE_FONT_WEIGHT_REGULAR)?,
+            text: gfx::text_format(
+                dwrite,
+                theme::TEXT_FONT,
+                theme::TEXT_SIZE,
+                DWRITE_FONT_WEIGHT_REGULAR,
+            )?,
+            bold: gfx::text_format(
+                dwrite,
+                theme::TEXT_FONT,
+                theme::TEXT_SIZE,
+                DWRITE_FONT_WEIGHT_BOLD,
+            )?,
+            icons: gfx::text_format(
+                dwrite,
+                theme::ICON_FONT,
+                theme::ICON_SIZE,
+                DWRITE_FONT_WEIGHT_REGULAR,
+            )?,
+            icons_small: gfx::text_format(
+                dwrite,
+                theme::ICON_FONT,
+                theme::ICON_SIZE_SMALL,
+                DWRITE_FONT_WEIGHT_REGULAR,
+            )?,
+            icons_large: gfx::text_format(
+                dwrite,
+                theme::ICON_FONT,
+                theme::ICON_SIZE_LARGE,
+                DWRITE_FONT_WEIGHT_REGULAR,
+            )?,
             cap: gfx::cap_height(dwrite, theme::TEXT_FONT, theme::TEXT_SIZE)?,
         })
     }
@@ -74,7 +99,15 @@ fn draw_logo(dc: &ID2D1DeviceContext, x: f32, h: f32, brush: &ID2D1SolidColorBru
         dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
         for (cx, cy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
             let (l, t) = (x0 + cx * (side + gap), y0 + cy * (side + gap));
-            dc.FillRectangle(&D2D_RECT_F { left: l, top: t, right: l + side, bottom: t + side }, brush);
+            dc.FillRectangle(
+                &D2D_RECT_F {
+                    left: l,
+                    top: t,
+                    right: l + side,
+                    bottom: t + side,
+                },
+                brush,
+            );
         }
         dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     }
@@ -83,7 +116,14 @@ fn draw_logo(dc: &ID2D1DeviceContext, x: f32, h: f32, brush: &ID2D1SolidColorBru
 
 /// Draws bar content (not the background) in DIPs on a transparent target.
 /// Right side first: clock and status icons keep their place, the app name gets the rest.
-pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, st: &State, w: f32, h: f32) -> Result<()> {
+pub fn draw(
+    dc: &ID2D1DeviceContext,
+    dwrite: &IDWriteFactory,
+    fonts: &Fonts,
+    st: &State,
+    w: f32,
+    h: f32,
+) -> Result<()> {
     let brush = unsafe { dc.CreateSolidColorBrush(&st.palette.text.d2d(), None)? };
     let faint = unsafe { dc.CreateSolidColorBrush(&st.palette.faint.d2d(), None)? };
     let alert = unsafe { dc.CreateSolidColorBrush(&st.palette.alert.d2d(), None)? };
@@ -108,8 +148,13 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, st:
         };
         let glyph = Label::new(dwrite, &icon.glyph.to_string(), font)?;
         let gx = edge - gap - glyph.width + glyph.ink_right;
-        let text = icon.percent.map(|p| Label::new(dwrite, &clock::percent(p), &fonts.text)).transpose()?;
-        let tx = text.as_ref().map(|t| gx + glyph.ink_left - theme::PERCENT_GAP - t.width + t.ink_right);
+        let text = icon
+            .percent
+            .map(|p| Label::new(dwrite, &clock::percent(p), &fonts.text))
+            .transpose()?;
+        let tx = text
+            .as_ref()
+            .map(|t| gx + glyph.ink_left - theme::PERCENT_GAP - t.width + t.ink_right);
         let new_edge = match (&text, tx) {
             (Some(t), Some(tx)) => tx + t.ink_left,
             _ => gx + glyph.ink_left,
@@ -130,7 +175,8 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, st:
 
     if !st.app_name.is_empty() {
         let max = edge - theme::MENUBAR_GAP - left;
-        Label::fitted(dwrite, &st.app_name, &fonts.bold, max)?.draw_text(dc, left, h, fonts.cap, &brush);
+        Label::fitted(dwrite, &st.app_name, &fonts.bold, max)?
+            .draw_text(dc, left, h, fonts.cap, &brush);
     }
     Ok(())
 }
@@ -169,7 +215,12 @@ impl MenuBar {
             hidden,
             dpi: Cell::new(0),
             size: Cell::new((0, 0)),
-            state: RefCell::new(State { app_name: String::new(), clock: String::new(), status: Vec::new(), palette }),
+            state: RefCell::new(State {
+                app_name: String::new(),
+                clock: String::new(),
+                status: Vec::new(),
+                palette,
+            }),
             comp: RefCell::new(None),
             sources: OnceCell::new(),
             status: Cell::new(status::Status::default()),
@@ -186,7 +237,15 @@ impl MenuBar {
         }
         bar.place();
         unsafe {
-            SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(on_foreground), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+            SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                None,
+                Some(on_foreground),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            );
         }
         bar.set_app(unsafe { GetForegroundWindow() });
         let sources = Sources::start(hwnd);
@@ -217,7 +276,12 @@ impl MenuBar {
         root.Children()?.InsertAtTop(&backdrop.tint_visual)?;
         root.Children()?.InsertAtTop(&content)?;
         target.SetRoot(&root)?;
-        *self.comp.borrow_mut() = Some(Comp { _target: target, backdrop, content, surface });
+        *self.comp.borrow_mut() = Some(Comp {
+            _target: target,
+            backdrop,
+            content,
+            surface,
+        });
         self.apply_background();
         Ok(())
     }
@@ -238,9 +302,21 @@ impl MenuBar {
         unsafe {
             let (monitor, dpi) = window::primary_monitor();
             let h = theme::px(theme::MENUBAR_HEIGHT, dpi);
-            let rc = if self.hidden { appbar::edge_rect(monitor, appbar::Edge::Top, h) } else { appbar::set_edge(hwnd, appbar::Edge::Top, monitor, h) };
+            let rc = if self.hidden {
+                appbar::edge_rect(monitor, appbar::Edge::Top, h)
+            } else {
+                appbar::set_edge(hwnd, appbar::Edge::Top, monitor, h)
+            };
             let size = (rc.right - rc.left, h);
-            _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), rc.left, rc.top, size.0, size.1, SWP_NOACTIVATE);
+            _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                rc.left,
+                rc.top,
+                size.0,
+                size.1,
+                SWP_NOACTIVATE,
+            );
 
             if dpi != self.dpi.get() || size != self.size.get() {
                 self.dpi.set(dpi);
@@ -257,7 +333,10 @@ impl MenuBar {
     fn resize_surface(&self, (w, h): (i32, i32)) -> Result<()> {
         if let Some(c) = self.comp.borrow().as_ref() {
             self.gfx.resize(&c.surface, w as u32, h as u32)?;
-            c.content.SetSize(Vector2 { X: w as f32, Y: h as f32 })?;
+            c.content.SetSize(Vector2 {
+                X: w as f32,
+                Y: h as f32,
+            })?;
         }
         Ok(())
     }
@@ -269,7 +348,9 @@ impl MenuBar {
         let scale = theme::scale(self.dpi.get());
         let (w, h) = self.size.get();
         let (wd, hd) = (w as f32 / scale, h as f32 / scale);
-        if let Err(e) = self.gfx.draw(&c.surface, scale, |dc| draw(dc, &self.gfx.dwrite, &self.fonts, &st, wd, hd)) {
+        if let Err(e) = self.gfx.draw(&c.surface, scale, |dc| {
+            draw(dc, &self.gfx.dwrite, &self.fonts, &st, wd, hd)
+        }) {
             log::error(&format!("menubar draw: {e}"));
         }
     }
@@ -285,7 +366,9 @@ impl MenuBar {
 
     /// Shows the app owning `fg`, unless it is a shell surface (Start, search).
     fn set_app(&self, fg: HWND) {
-        let Some(name) = appid::display_name(fg) else { return };
+        let Some(name) = appid::display_name(fg) else {
+            return;
+        };
         if self.state.borrow().app_name == name {
             return;
         }
@@ -295,7 +378,9 @@ impl MenuBar {
 
     /// Re-reads only the source that changed (a volume drag fires dozens of events).
     fn refresh_status(&self, what: usize) {
-        let Some(sources) = self.sources.get() else { return };
+        let Some(sources) = self.sources.get() else {
+            return;
+        };
         let mut st = self.status.get();
         match what {
             status::VOLUME => st.volume = sources.read_volume(),
@@ -337,7 +422,6 @@ impl MenuBar {
             self.redraw();
         }
     }
-
 }
 
 impl Handler for MenuBar {
@@ -354,7 +438,11 @@ impl Handler for MenuBar {
             WM_APPBAR if wp.0 as u32 == ABN_POSCHANGED => self.place(),
             WM_DPICHANGED | WM_DISPLAYCHANGE => self.place(),
             WM_SETTINGCHANGE => {
-                let what = if lp.0 == 0 { String::new() } else { unsafe { PCWSTR(lp.0 as *const u16).to_string().unwrap_or_default() } };
+                let what = if lp.0 == 0 {
+                    String::new()
+                } else {
+                    unsafe { PCWSTR(lp.0 as *const u16).to_string().unwrap_or_default() }
+                };
                 match what.as_str() {
                     "ImmersiveColorSet" => self.refresh_palette(),
                     "intl" => self.refresh_clock(),
@@ -383,8 +471,23 @@ impl Handler for MenuBar {
 
 /// Out-of-context hook: runs on our thread from the message loop. Posts, so the
 /// name lookup happens in normal dispatch and never re-enters a handler.
-unsafe extern "system" fn on_foreground(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, _: i32, _: u32, _: u32) {
+unsafe extern "system" fn on_foreground(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _: i32,
+    _: u32,
+    _: u32,
+) {
     if id_object == OBJID_WINDOW.0 && !hwnd.is_invalid() {
-        unsafe { _ = PostMessageW(Some(BAR_HWND.get()), WM_FOREGROUND, WPARAM(hwnd.0 as usize), LPARAM(0)) };
+        unsafe {
+            _ = PostMessageW(
+                Some(BAR_HWND.get()),
+                WM_FOREGROUND,
+                WPARAM(hwnd.0 as usize),
+                LPARAM(0),
+            )
+        };
     }
 }

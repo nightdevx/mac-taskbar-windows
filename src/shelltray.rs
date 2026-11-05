@@ -9,14 +9,20 @@ use std::path::PathBuf;
 
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
-use windows::Win32::UI::Shell::{ABM_GETSTATE, ABM_SETSTATE, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage};
+use windows::Win32::UI::Shell::{
+    ABM_GETSTATE, ABM_SETSTATE, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 use crate::log;
 
 fn state_file() -> Option<PathBuf> {
-    Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("taskbar").join("autohide-before.txt"))
+    Some(
+        PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+            .join("taskbar")
+            .join("autohide-before.txt"),
+    )
 }
 
 /// Windows taskbar windows: the main one and one per extra monitor.
@@ -33,11 +39,20 @@ fn trays() -> Vec<HWND> {
 }
 
 fn tray_data(tray: HWND, state: u32) -> APPBARDATA {
-    APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: tray, lParam: LPARAM(state as isize), ..Default::default() }
+    APPBARDATA {
+        cbSize: size_of::<APPBARDATA>() as u32,
+        hWnd: tray,
+        lParam: LPARAM(state as isize),
+        ..Default::default()
+    }
 }
 
 fn set_autohide(tray: HWND, on: bool, base: u32) {
-    let state = if on { base | ABS_AUTOHIDE } else { base & !ABS_AUTOHIDE };
+    let state = if on {
+        base | ABS_AUTOHIDE
+    } else {
+        base & !ABS_AUTOHIDE
+    };
     let mut d = tray_data(tray, state);
     unsafe { SHAppBarMessage(ABM_SETSTATE, &mut d) };
 }
@@ -45,7 +60,9 @@ fn set_autohide(tray: HWND, on: bool, base: u32) {
 /// Hides every Windows taskbar. Safe to call again after Explorer restarts.
 pub fn hide() {
     let trays = trays();
-    let Some(&main) = trays.first() else { return log::error("Windows taskbar not found") };
+    let Some(&main) = trays.first() else {
+        return log::error("Windows taskbar not found");
+    };
     let mut d = tray_data(main, 0);
     let state = unsafe { SHAppBarMessage(ABM_GETSTATE, &mut d) } as u32;
     // Keep the first saved value: after a crash the current state is our own auto-hide.
@@ -64,7 +81,9 @@ pub fn hide() {
 /// Shows the Windows taskbar again with the user's saved auto-hide setting.
 pub fn restore() {
     let trays = trays();
-    let saved = state_file().and_then(|f| std::fs::read_to_string(&f).ok()).and_then(|s| s.trim().parse::<u32>().ok());
+    let saved = state_file()
+        .and_then(|f| std::fs::read_to_string(&f).ok())
+        .and_then(|s| s.trim().parse::<u32>().ok());
     if let (Some(&main), Some(state)) = (trays.first(), saved) {
         set_autohide(main, state & ABS_AUTOHIDE != 0, state);
     }
@@ -82,11 +101,27 @@ fn watch(tray: HWND) {
     let mut pid = 0;
     unsafe {
         GetWindowThreadProcessId(tray, Some(&mut pid));
-        SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, None, Some(on_show), pid, 0, WINEVENT_OUTOFCONTEXT);
+        SetWinEventHook(
+            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_SHOW,
+            None,
+            Some(on_show),
+            pid,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
     }
 }
 
-unsafe extern "system" fn on_show(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, _: i32, _: u32, _: u32) {
+unsafe extern "system" fn on_show(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _: i32,
+    _: u32,
+    _: u32,
+) {
     if id_object == OBJID_WINDOW.0 && trays().contains(&hwnd) {
         unsafe { _ = ShowWindow(hwnd, SW_HIDE) };
     }

@@ -8,8 +8,11 @@ mod gfx;
 mod icons;
 mod log;
 mod magnify;
+mod menu;
 mod menubar;
+mod popup;
 mod prefs;
+mod preview;
 mod settings;
 mod shelltray;
 mod snapshot;
@@ -26,9 +29,15 @@ use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::Diagnostics::Debug::{EXCEPTION_POINTERS, SetUnhandledExceptionFilter};
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::System::WinRT::{CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions};
-use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
-use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, FindWindowW, GetMessageW, MSG, PostMessageW, TranslateMessage, WM_CLOSE};
+use windows::Win32::System::WinRT::{
+    CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
+};
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, FindWindowW, GetMessageW, MSG, PostMessageW, TranslateMessage, WM_CLOSE,
+};
 use windows::core::{BOOL, Result, w};
 
 fn main() {
@@ -78,7 +87,12 @@ fn run(hidden: bool, open_settings: bool) -> Result<()> {
     let gfx = Rc::new(gfx::Gfx::new()?);
     let bar = menubar::MenuBar::create(gfx.clone(), hidden)?;
     let dock = dock::Dock::create(gfx.clone(), hidden)?;
-    prefs::init(gfx)?;
+    prefs::init(gfx.clone())?;
+    menu::init(gfx.clone())?;
+    preview::init(
+        gfx,
+        unsafe { FindWindowW(dock::CLASS, None) }.unwrap_or_default(),
+    )?;
     settings::listen(move |before, after| {
         dock.apply(before, after);
         bar.apply(before, after);
@@ -91,7 +105,10 @@ fn run(hidden: bool, open_settings: bool) -> Result<()> {
         shelltray::hide();
         unsafe { SetUnhandledExceptionFilter(Some(on_crash)) };
     }
-    log::info(&format!("started in {} ms (hidden: {hidden})", started.elapsed().as_millis()));
+    log::info(&format!(
+        "started in {} ms (hidden: {hidden})",
+        started.elapsed().as_millis()
+    ));
 
     let mut msg = MSG::default();
     unsafe {

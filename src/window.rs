@@ -4,7 +4,9 @@
 use windows::UI::Composition::{CompositionColorBrush, Compositor, SpriteVisual};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -18,7 +20,12 @@ pub trait Handler {
     fn handle(&self, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT>;
 }
 
-unsafe extern "system" fn wndproc<T: Handler + 'static>(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+unsafe extern "system" fn wndproc<T: Handler + 'static>(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+) -> LRESULT {
     unsafe {
         if msg == WM_NCCREATE {
             let cs = &*(lp.0 as *const CREATESTRUCTW);
@@ -37,10 +44,20 @@ unsafe extern "system" fn wndproc<T: Handler + 'static>(hwnd: HWND, msg: u32, wp
 /// Topmost, never-activated popup without a taskbar entry, drawn only through
 /// composition. Messages go to `handler`, which lives for the whole process.
 pub fn create<T: Handler + 'static>(class: PCWSTR, handler: &'static T) -> Result<HWND> {
-    create_with(class, WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP, WS_POPUP, handler)
+    create_with(
+        class,
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+        WS_POPUP,
+        handler,
+    )
 }
 
-pub fn create_with<T: Handler + 'static>(class: PCWSTR, ex_style: WINDOW_EX_STYLE, style: WINDOW_STYLE, handler: &'static T) -> Result<HWND> {
+pub fn create_with<T: Handler + 'static>(
+    class: PCWSTR,
+    ex_style: WINDOW_EX_STYLE,
+    style: WINDOW_STYLE,
+    handler: &'static T,
+) -> Result<HWND> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
         let wc = WNDCLASSEXW {
@@ -73,7 +90,10 @@ pub fn create_with<T: Handler + 'static>(class: PCWSTR, ex_style: WINDOW_EX_STYL
 pub fn primary_monitor() -> (RECT, u32) {
     unsafe {
         let monitor = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
-        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mut mi = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
         let (mut dpi, mut dpi_y) = (96, 96);
         _ = GetMonitorInfoW(monitor, &mut mi);
         _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
@@ -93,7 +113,12 @@ impl Backdrop {
         let full = Vector2 { X: 1.0, Y: 1.0 };
         unsafe {
             let on = windows::core::BOOL(1);
-            DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as *const _, 4)?;
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_HOSTBACKDROPBRUSH,
+                &on as *const _ as *const _,
+                4,
+            )?;
         }
         let blur = c.CreateSpriteVisual()?;
         blur.SetRelativeSizeAdjustment(full)?;
@@ -102,13 +127,19 @@ impl Backdrop {
         let tint_visual = c.CreateSpriteVisual()?;
         tint_visual.SetRelativeSizeAdjustment(full)?;
         tint_visual.SetBrush(&tint)?;
-        Ok(Self { blur, tint_visual, tint })
+        Ok(Self {
+            blur,
+            tint_visual,
+            tint,
+        })
     }
 
     /// Tint over blur, or the same colour opaque when transparency effects are off.
     pub fn apply(&self, color: theme::Rgba) {
         let blur = theme::transparency();
         _ = self.blur.SetIsVisible(blur);
-        _ = self.tint.SetColor(if blur { color } else { color.opaque() }.ui());
+        _ = self
+            .tint
+            .SetColor(if blur { color } else { color.opaque() }.ui());
     }
 }

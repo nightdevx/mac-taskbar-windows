@@ -35,11 +35,21 @@ pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
 
 impl Rgba {
     pub fn d2d(self) -> D2D1_COLOR_F {
-        D2D1_COLOR_F { r: self.0 as f32 / 255.0, g: self.1 as f32 / 255.0, b: self.2 as f32 / 255.0, a: self.3 as f32 / 255.0 }
+        D2D1_COLOR_F {
+            r: self.0 as f32 / 255.0,
+            g: self.1 as f32 / 255.0,
+            b: self.2 as f32 / 255.0,
+            a: self.3 as f32 / 255.0,
+        }
     }
 
     pub fn ui(self) -> windows::UI::Color {
-        windows::UI::Color { R: self.0, G: self.1, B: self.2, A: self.3 }
+        windows::UI::Color {
+            R: self.0,
+            G: self.1,
+            B: self.2,
+            A: self.3,
+        }
     }
 
     pub fn opaque(self) -> Self {
@@ -52,14 +62,32 @@ pub struct Palette {
     /// Bar fill laid over the blurred backdrop.
     pub bar: Rgba,
     pub text: Rgba,
-    /// Empty Wi-Fi arcs under the signal glyph.
+    /// Empty Wi-Fi arcs under the signal glyph; menu separators.
     pub faint: Rgba,
+    /// Menus and previews: tint over the blur, a little denser than the bar.
+    pub popup: Rgba,
+    /// Hovered preview card.
+    pub hover: Rgba,
     /// Low battery. Fluent "critical" colours for each theme.
     pub alert: Rgba,
 }
 
-pub const DARK: Palette = Palette { bar: Rgba(28, 28, 30, 150), text: Rgba(255, 255, 255, 235), faint: Rgba(255, 255, 255, 78), alert: Rgba(255, 153, 164, 255) };
-pub const LIGHT: Palette = Palette { bar: Rgba(246, 246, 248, 165), text: Rgba(0, 0, 0, 220), faint: Rgba(0, 0, 0, 73), alert: Rgba(196, 43, 28, 255) };
+pub const DARK: Palette = Palette {
+    bar: Rgba(28, 28, 30, 150),
+    text: Rgba(255, 255, 255, 235),
+    faint: Rgba(255, 255, 255, 78),
+    popup: Rgba(40, 40, 42, 205),
+    hover: Rgba(255, 255, 255, 28),
+    alert: Rgba(255, 153, 164, 255),
+};
+pub const LIGHT: Palette = Palette {
+    bar: Rgba(246, 246, 248, 165),
+    text: Rgba(0, 0, 0, 220),
+    faint: Rgba(0, 0, 0, 73),
+    popup: Rgba(246, 246, 248, 215),
+    hover: Rgba(0, 0, 0, 18),
+    alert: Rgba(196, 43, 28, 255),
+};
 
 fn personalize_flag(name: PCWSTR) -> Option<bool> {
     let mut value = 0u32;
@@ -81,7 +109,11 @@ fn personalize_flag(name: PCWSTR) -> Option<bool> {
 
 /// System surfaces (taskbar, Start) follow `SystemUsesLightTheme`, not the app setting.
 pub fn system_palette() -> Palette {
-    if personalize_flag(w!("SystemUsesLightTheme")) == Some(true) { LIGHT } else { DARK }
+    if personalize_flag(w!("SystemUsesLightTheme")) == Some(true) {
+        LIGHT
+    } else {
+        DARK
+    }
 }
 
 /// App windows (our settings window) follow `AppsUseLightTheme`.
@@ -105,7 +137,11 @@ pub fn accent() -> Rgba {
         )
         .is_ok()
     };
-    if ok { Rgba(abgr as u8, (abgr >> 8) as u8, (abgr >> 16) as u8, 255) } else { Rgba(0, 120, 212, 255) }
+    if ok {
+        Rgba(abgr as u8, (abgr >> 8) as u8, (abgr >> 16) as u8, 255)
+    } else {
+        Rgba(0, 120, 212, 255)
+    }
 }
 
 /// Settings > Personalisation > Colours > Transparency effects. Missing value means on.
