@@ -1,13 +1,17 @@
-//! Who owns a window: exe path, package AppUserModelID and a human display name.
+//! Who owns a window or a pinned shortcut: exe path, AppUserModelID and a
+//! human display name. Dock entries group windows by this identity.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HWND};
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HWND, PROPERTYKEY};
+use windows::Win32::Storage::EnhancedStorage::{PKEY_AppUserModel_ID, PKEY_Link_TargetParsingPath};
 use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
+use windows::Win32::UI::Shell::PropertiesSystem::{GPS_DEFAULT, IPropertyStore, SHGetPropertyStoreForWindow, SHGetPropertyStoreFromParsingName};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY};
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
@@ -38,6 +42,55 @@ pub fn process_identity(hwnd: HWND) -> Option<(String, Option<String>)> {
         .then(|| String::from_utf16_lossy(&buf[..len.saturating_sub(1) as usize]));
     unsafe { _ = CloseHandle(process) };
     Some((exe?, package))
+}
+
+/// What a dock entry stands for. Either side may be unknown.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AppIdentity {
+    pub aumid: Option<String>,
+    /// Lower-case full exe path; `None` for Store app frames (ApplicationFrameHost hosts them all).
+    pub exe: Option<String>,
+}
+
+impl AppIdentity {
+    /// Same app when the AUMIDs match or the exes match. Exe matching groups all
+    /// windows of an app (Brave profiles have their own AUMIDs), as the macOS dock does.
+    pub fn same_app(&self, other: &AppIdentity) -> bool {
+        let eq = |a: &Option<String>, b: &Option<String>| matches!((a, b), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b));
+        eq(&self.aumid, &other.aumid) || eq(&self.exe, &other.exe)
+    }
+}
+
+fn store_string(store: &IPropertyStore, key: &PROPERTYKEY) -> Option<String> {
+    unsafe {
+        let mut value = store.GetValue(key).ok()?;
+        let s = PropVariantToStringAlloc(&value).ok().and_then(take_pwstr);
+        _ = PropVariantClear(&mut value);
+        s
+    }
+}
+
+/// AUMID set explicitly on the window (Store app frames, browsers, Terminal).
+pub fn window_aumid(hwnd: HWND) -> Option<String> {
+    let store: IPropertyStore = unsafe { SHGetPropertyStoreForWindow(hwnd).ok()? };
+    store_string(&store, &PKEY_AppUserModel_ID)
+}
+
+pub fn window_identity(hwnd: HWND) -> Option<AppIdentity> {
+    let (exe, package) = process_identity(hwnd)?;
+    let aumid = package.or_else(|| window_aumid(hwnd));
+    let exe = (file_name_lower(&exe) != "applicationframehost.exe").then(|| exe.to_lowercase());
+    Some(AppIdentity { aumid, exe })
+}
+
+/// Identity of a pinned shortcut (.lnk): its AUMID property and target exe.
+pub fn link_identity(path: &str) -> Option<AppIdentity> {
+    let store: IPropertyStore = unsafe { SHGetPropertyStoreFromParsingName(&HSTRING::from(path), None, GPS_DEFAULT).ok()? };
+    let exe = store_string(&store, &PKEY_Link_TargetParsingPath)
+        .filter(|t| t.to_ascii_lowercase().ends_with(".exe"))
+        .map(|t| t.to_lowercase());
+    let aumid = store_string(&store, &PKEY_AppUserModel_ID);
+    (aumid.is_some() || exe.is_some()).then_some(AppIdentity { aumid, exe })
 }
 
 thread_local! {
@@ -189,7 +242,31 @@ mod tests {
         for hwnd in list {
             let (exe, package) = process_identity(hwnd).unwrap_or_default();
             let id = package.unwrap_or_default();
+            println!("    identity {:?}", window_identity(hwnd));
             println!("{:<22} aumid={:<55} apps={:?} -> {:?}", file_name_lower(&exe), id, aumid_name(&id), display_name(hwnd));
+        }
+    }
+
+    #[test]
+    fn same_app_by_aumid_or_exe() {
+        let id = |a: Option<&str>, e: Option<&str>| AppIdentity { aumid: a.map(Into::into), exe: e.map(Into::into) };
+        let brave_pin = id(Some("Brave"), Some("c:/brave/brave.exe"));
+        let brave_profile = id(Some("Brave.UserData.Profile1"), Some("C:/Brave/brave.exe"));
+        assert!(brave_pin.same_app(&brave_profile));
+        let store = id(Some("App.Pkg!App"), None);
+        assert!(store.same_app(&id(Some("app.pkg!app"), None)));
+        assert!(!store.same_app(&id(Some("Other!App"), None)));
+        assert!(!id(None, None).same_app(&id(None, None)));
+    }
+
+    /// Manual check: `cargo test pinned_links_resolve -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn pinned_links_resolve() {
+        unsafe { _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+        let dir = std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap()).join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            println!("{:?} -> {:?}", e.file_name(), link_identity(&e.path().to_string_lossy()));
         }
     }
 }

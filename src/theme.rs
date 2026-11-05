@@ -18,6 +18,18 @@ pub const LOGO_GAP: f32 = 1.0;
 pub const LOGO_TO_NAME: f32 = 18.0;
 /// Status icons give way before the app name gets narrower than this.
 pub const NAME_MIN_WIDTH: f32 = 120.0;
+/// Dock geometry (DIPs).
+pub const DOCK_ICON: f32 = 48.0;
+pub const DOCK_PAD: f32 = 6.0;
+/// Below the icons: room for the running dot.
+pub const DOCK_PAD_BOTTOM: f32 = 10.0;
+pub const DOCK_GAP: f32 = 6.0;
+pub const DOCK_RADIUS: f32 = 18.0;
+/// Space between the dock and the screen edge.
+pub const DOCK_MARGIN: f32 = 6.0;
+pub const DOCK_DOT: f32 = 4.0;
+/// Largest magnification (F3); icons are extracted at this size.
+pub const DOCK_MAGNIFY: f32 = 1.6;
 pub const TEXT_FONT: &str = "Segoe UI Variable Text";
 pub const TEXT_SIZE: f32 = 13.0;
 pub const ICON_FONT: &str = "Segoe Fluent Icons";

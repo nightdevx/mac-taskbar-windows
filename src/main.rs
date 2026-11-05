@@ -3,13 +3,16 @@
 mod appbar;
 mod appid;
 mod clock;
+mod dock;
 mod gfx;
+mod icons;
 mod log;
 mod menubar;
 mod snapshot;
 mod status;
 mod theme;
 mod window;
+mod winlist;
 
 use std::rc::Rc;
 use std::time::Instant;
@@ -29,6 +32,7 @@ fn main() {
     let flag = |name: &str| args.iter().any(|a| a == name);
     let result = if let Some(i) = args.iter().position(|a| a == "--snapshot") {
         snapshot::run(args.get(i + 1).map_or("snapshot.png", String::as_str))
+
     } else if flag("--quit") {
         quit_running();
         Ok(())
@@ -62,7 +66,8 @@ fn run(hidden: bool) -> Result<()> {
     };
 
     let gfx = Rc::new(gfx::Gfx::new()?);
-    menubar::MenuBar::create(gfx, hidden)?;
+    menubar::MenuBar::create(gfx.clone(), hidden)?;
+    dock::Dock::create(gfx, hidden)?;
     log::info(&format!("started in {} ms (hidden: {hidden})", started.elapsed().as_millis()));
 
     let mut msg = MSG::default();
@@ -78,9 +83,12 @@ fn run(hidden: bool) -> Result<()> {
 
 /// `--quit`: asks the running instance to close cleanly (gives back the screen edge).
 fn quit_running() {
-    unsafe {
-        if let Ok(hwnd) = FindWindowW(menubar::CLASS, None) {
-            _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+    // Dock first: the menu bar's WM_DESTROY ends the message loop.
+    for class in [dock::CLASS, menubar::CLASS] {
+        unsafe {
+            if let Ok(hwnd) = FindWindowW(class, None) {
+                _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
         }
     }
 }
