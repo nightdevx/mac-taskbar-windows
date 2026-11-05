@@ -22,6 +22,8 @@ use crate::{appbar, appid, clock, log, menu, panels, popup};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 
 pub const CLASS: PCWSTR = w!("TaskbarMenuBar");
+/// Bars on the other monitors: own class, so `--quit` finds the main bar.
+const CLASS_OTHER: PCWSTR = w!("TaskbarMenuBarOther");
 const WM_APPBAR: u32 = WM_APP + 1;
 const WM_FOREGROUND: u32 = WM_APP + 2;
 const TIMER_CLOCK: usize = 1;
@@ -29,6 +31,8 @@ const TIMER_CLOCK: usize = 1;
 thread_local! {
     /// Target for hook callbacks, which get no user data.
     static BAR_HWND: Cell<HWND> = Cell::new(HWND::default());
+    /// Bars on the other monitors, mirroring the main bar (macOS shows one per display).
+    static OTHERS: RefCell<Vec<&'static MenuBar>> = const { RefCell::new(Vec::new()) };
 }
 
 pub struct Fonts {
@@ -79,6 +83,7 @@ impl Fonts {
     }
 }
 
+#[derive(Clone)]
 pub struct State {
     pub app_name: String,
     pub clock: String,
@@ -226,6 +231,10 @@ pub struct MenuBar {
     /// Guards `place()`: the AppBar calls dispatch sent messages and can re-enter.
     placing: Cell<bool>,
     taskbar_created: u32,
+    /// Another monitor's bar: its screen; `None` for the main bar (primary monitor).
+    area: Cell<Option<RECT>>,
+    /// Registered as an AppBar (other bars drop it when their monitor goes away).
+    registered: Cell<bool>,
 }
 
 impl MenuBar {
@@ -250,6 +259,8 @@ impl MenuBar {
             status: Cell::new(status::Status::default()),
             placing: Cell::new(false),
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+            area: Cell::new(None),
+            registered: Cell::new(!hidden),
         }));
 
         let hwnd = window::create(CLASS, bar)?;
@@ -260,6 +271,7 @@ impl MenuBar {
             appbar::register(hwnd, WM_APPBAR);
         }
         bar.place();
+        bar.sync_monitors();
         unsafe {
             SetWinEventHook(
                 EVENT_SYSTEM_FOREGROUND,
@@ -317,7 +329,89 @@ impl MenuBar {
         }
     }
 
-    /// Sizes and positions the bar on the primary monitor; redraws if the size or DPI changed.
+    fn is_main(&self) -> bool {
+        self.area.get().is_none()
+    }
+
+    /// One mirror bar per extra monitor: created when a monitor appears, hidden
+    /// (and its screen edge given back) when it goes. Only the main bar runs this.
+    fn sync_monitors(&'static self) {
+        if self.hidden || !self.is_main() {
+            return;
+        }
+        let rects = window::other_monitors();
+        let have = OTHERS.with(|o| o.borrow().len());
+        for _ in have..rects.len() {
+            match self.create_other() {
+                Ok(b) => OTHERS.with(|o| o.borrow_mut().push(b)),
+                Err(e) => return log::error(&format!("menubar on other monitor: {e}")),
+            }
+        }
+        let others: Vec<&'static MenuBar> = OTHERS.with(|o| o.borrow().clone());
+        for (i, b) in others.iter().enumerate() {
+            match rects.get(i) {
+                Some(rc) => {
+                    b.area.set(Some(*rc));
+                    if !b.registered.replace(true) {
+                        appbar::register(b.hwnd.get(), WM_APPBAR);
+                    }
+                    b.size.set((0, 0));
+                    b.place();
+                    unsafe { _ = ShowWindow(b.hwnd.get(), SW_SHOWNOACTIVATE) };
+                }
+                None => {
+                    unsafe { _ = ShowWindow(b.hwnd.get(), SW_HIDE) };
+                    if b.registered.replace(false) {
+                        appbar::remove(b.hwnd.get());
+                    }
+                }
+            }
+        }
+        self.mirror();
+    }
+
+    fn create_other(&self) -> Result<&'static MenuBar> {
+        let bar: &'static MenuBar = Box::leak(Box::new(MenuBar {
+            hwnd: Cell::new(HWND::default()),
+            fonts: Fonts::new(&self.gfx.dwrite)?,
+            gfx: self.gfx.clone(),
+            hidden: false,
+            dpi: Cell::new(0),
+            size: Cell::new((0, 0)),
+            state: RefCell::new(self.state.borrow().clone()),
+            comp: RefCell::new(None),
+            zones: RefCell::new(Vec::new()),
+            sources: OnceCell::new(),
+            status: Cell::new(self.status.get()),
+            placing: Cell::new(false),
+            taskbar_created: self.taskbar_created,
+            area: Cell::new(Some(RECT::default())),
+            registered: Cell::new(false),
+        }));
+        bar.hwnd.set(window::create(CLASS_OTHER, bar)?);
+        bar.init_visuals()?;
+        Ok(bar)
+    }
+
+    /// Copies the main bar's content (app, clock, icons, colours) to the others.
+    fn mirror(&self) {
+        if !self.is_main() {
+            return;
+        }
+        let st = self.state.borrow().clone();
+        for b in OTHERS.with(|o| o.borrow().clone()) {
+            if b.registered.get() {
+                if b.state.borrow().palette != st.palette {
+                    *b.state.borrow_mut() = st.clone();
+                    b.apply_background();
+                } else {
+                    *b.state.borrow_mut() = st.clone();
+                }
+                b.redraw();
+            }
+        }
+    }
+
     /// A full-screen app (game, video, slides) has the monitor: bar and dock
     /// step aside until it leaves. Our own Launchpad and the desktop don't count.
     fn fullscreen(&self, on: bool) {
@@ -330,19 +424,26 @@ impl MenuBar {
         }
         unsafe {
             _ = ShowWindow(self.hwnd.get(), if on { SW_HIDE } else { SW_SHOWNOACTIVATE });
+            if !self.is_main() {
+                return; // the dock lives on the primary monitor
+            }
             if let Ok(dock) = FindWindowW(crate::dock::CLASS, None) {
                 _ = PostMessageW(Some(dock), crate::dock::WM_FULLSCREEN, WPARAM(on as usize), LPARAM(0));
             }
         }
     }
 
+    /// Sizes and positions the bar along the top of its monitor; redraws if the size or DPI changed.
     fn place(&self) {
         if self.placing.replace(true) {
             return;
         }
         let hwnd = self.hwnd.get();
         unsafe {
-            let (monitor, dpi) = window::primary_monitor();
+            let (monitor, dpi) = match self.area.get() {
+                Some(rc) => window::monitor_at(rc.left + 1, rc.top + 1),
+                None => window::primary_monitor(),
+            };
             let h = theme::px(theme::MENUBAR_HEIGHT, dpi);
             let rc = if self.hidden {
                 appbar::edge_rect(monitor, appbar::Edge::Top, h)
@@ -396,6 +497,8 @@ impl MenuBar {
         }) {
             log::error(&format!("menubar draw: {e}"));
         }
+        drop((st, comp));
+        self.mirror();
     }
 
     /// Opens the panel or menu of the part under `x` (client px), macOS style.
@@ -535,7 +638,15 @@ impl Handler for MenuBar {
             }
             WM_APPBAR if wp.0 as u32 == ABN_POSCHANGED => self.place(),
             WM_APPBAR if wp.0 as u32 == ABN_FULLSCREENAPP => self.fullscreen(lp.0 != 0),
-            WM_DPICHANGED | WM_DISPLAYCHANGE => self.place(),
+            WM_DPICHANGED => self.place(),
+            WM_DISPLAYCHANGE => {
+                self.place();
+                if self.is_main() {
+                    let me: &'static MenuBar = unsafe { &*(self as *const MenuBar) };
+                    me.sync_monitors();
+                }
+            }
+            WM_SETTINGCHANGE if !self.is_main() => return None, // the main bar mirrors its colours
             WM_SETTINGCHANGE => {
                 let what = if lp.0 == 0 {
                     String::new()
@@ -550,13 +661,19 @@ impl Handler for MenuBar {
             }
             WM_MOUSEACTIVATE => return Some(LRESULT(MA_NOACTIVATE as isize)),
             WM_CLOSE => unsafe { _ = DestroyWindow(self.hwnd.get()) },
+            WM_DESTROY if !self.is_main() => {}
             WM_DESTROY => {
                 if !self.hidden {
                     appbar::remove(self.hwnd.get());
+                    for b in OTHERS.with(|o| o.borrow().clone()) {
+                        if b.registered.replace(false) {
+                            appbar::remove(b.hwnd.get());
+                        }
+                    }
                 }
                 unsafe { PostQuitMessage(0) };
             }
-            m if m == self.taskbar_created && !self.hidden => {
+            m if m == self.taskbar_created && !self.hidden && self.registered.get() => {
                 // Explorer restarted and forgot every AppBar.
                 appbar::register(self.hwnd.get(), WM_APPBAR);
                 self.size.set((0, 0));

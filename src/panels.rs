@@ -534,8 +534,8 @@ impl Panel {
         };
         let (_, h) = layout(&rows);
         *self.rows.borrow_mut() = rows;
-        let (monitor, dpi) = window::primary_monitor();
         let (x, y) = self.anchor.get();
+        let (monitor, dpi) = window::monitor_at(x, y);
         self.popup().show(x, Place::Below(y), monitor, dpi, WIDTH, h, |dc| self.draw(dc));
     }
 

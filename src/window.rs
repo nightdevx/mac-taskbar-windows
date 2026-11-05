@@ -5,8 +5,10 @@ use windows::UI::Composition::{CompositionColorBrush, Compositor, SpriteVisual};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    MONITORINFO, MonitorFromPoint,
 };
+use windows::core::BOOL;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -101,6 +103,35 @@ pub fn primary_monitor() -> (RECT, u32) {
     }
 }
 
+/// Monitor rect and DPI under a screen point (menus and panels open there).
+pub fn monitor_at(x: i32, y: i32) -> (RECT, u32) {
+    unsafe { monitor_info(MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST)) }
+}
+
+unsafe fn monitor_info(monitor: HMONITOR) -> (RECT, u32) {
+    let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let (mut dpi, mut dpi_y) = (96, 96);
+    unsafe {
+        _ = GetMonitorInfoW(monitor, &mut mi);
+        _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
+    }
+    (mi.rcMonitor, dpi)
+}
+
+/// Every monitor except the primary one, left to right.
+pub fn other_monitors() -> Vec<RECT> {
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
+        unsafe { (*(out.0 as *mut Vec<HMONITOR>)).push(m) };
+        true.into()
+    }
+    let mut all: Vec<HMONITOR> = Vec::new();
+    unsafe { _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut all as *mut _ as isize)) };
+    let primary = primary_monitor().0;
+    let mut rects: Vec<RECT> = all.into_iter().map(|m| unsafe { monitor_info(m).0 }).filter(|r| *r != primary).collect();
+    rects.sort_by_key(|r| (r.left, r.top));
+    rects
+}
+
 /// Blurred desktop plus a tint layer, both filling their parent.
 pub struct Backdrop {
     pub blur: SpriteVisual,
@@ -141,5 +172,18 @@ impl Backdrop {
         _ = self
             .tint
             .SetColor(if blur { color } else { color.opaque() }.ui());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Real monitors: `cargo test monitors -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn lists_other_monitors() {
+        println!("primary {:?}", super::primary_monitor());
+        println!("others {:?}", super::other_monitors());
+        let (_, dpi) = super::monitor_at(-1000, 10);
+        println!("dpi at (-1000, 10): {dpi}");
     }
 }
