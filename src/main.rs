@@ -8,6 +8,7 @@ mod gfx;
 mod icons;
 mod log;
 mod menubar;
+mod settings;
 mod shelltray;
 mod snapshot;
 mod status;

@@ -78,9 +78,23 @@ pub fn window_aumid(hwnd: HWND) -> Option<String> {
 
 pub fn window_identity(hwnd: HWND) -> Option<AppIdentity> {
     let (exe, package) = process_identity(hwnd)?;
-    let aumid = package.or_else(|| window_aumid(hwnd));
-    let exe = (file_name_lower(&exe) != "applicationframehost.exe").then(|| exe.to_lowercase());
+    let name = file_name_lower(&exe);
+    // Explorer windows carry no AUMID, but the pinned "File Explorer" shortcut does.
+    let implicit = (name == "explorer.exe").then(|| "Microsoft.Windows.Explorer".to_string());
+    let aumid = package.or_else(|| window_aumid(hwnd)).or(implicit);
+    let exe = (name != "applicationframehost.exe").then(|| exe.to_lowercase());
     Some(AppIdentity { aumid, exe })
+}
+
+/// Identity of a pin source: a .lnk, `shell:AppsFolder\<AUMID>` or an exe path.
+pub fn source_identity(source: &str) -> Option<AppIdentity> {
+    if source.to_ascii_lowercase().ends_with(".lnk") {
+        return link_identity(source);
+    }
+    if let Some(aumid) = source.strip_prefix(r"shell:AppsFolder\") {
+        return Some(AppIdentity { aumid: Some(aumid.to_string()), exe: None });
+    }
+    Some(AppIdentity { aumid: None, exe: Some(source.to_lowercase()) })
 }
 
 /// Identity of a pinned shortcut (.lnk): its AUMID property and target exe.
@@ -245,6 +259,13 @@ mod tests {
             println!("    identity {:?}", window_identity(hwnd));
             println!("{:<22} aumid={:<55} apps={:?} -> {:?}", file_name_lower(&exe), id, aumid_name(&id), display_name(hwnd));
         }
+    }
+
+    #[test]
+    fn source_identity_kinds() {
+        assert_eq!(source_identity(r"shell:AppsFolder\Pkg_x!App").unwrap(), AppIdentity { aumid: Some("Pkg_x!App".into()), exe: None });
+        assert_eq!(source_identity(r"C:\Apps\Tool.EXE").unwrap(), AppIdentity { aumid: None, exe: Some(r"c:\apps\tool.exe".into()) });
+        assert!(source_identity(r"C:\missing\nothing.lnk").is_none());
     }
 
     #[test]
