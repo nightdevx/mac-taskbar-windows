@@ -910,7 +910,11 @@ impl Dock {
 
     /// Folders from the settings, then Trash, right of the separator.
     fn sync_stacks(&self) {
-        while let Some(i) = self.items.borrow().iter().position(|i| matches!(i.kind, Kind::Folder | Kind::Trash)) {
+        loop {
+            // Own statement: a `while let` scrutinee keeps the borrow for the
+            // whole body, and remove_item needs items mutably.
+            let found = self.items.borrow().iter().position(|i| matches!(i.kind, Kind::Folder | Kind::Trash));
+            let Some(i) = found else { break };
             self.remove_item(i);
         }
         let none = || AppIdentity { aumid: None, exe: None };

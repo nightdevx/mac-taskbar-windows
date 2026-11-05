@@ -583,7 +583,9 @@ impl Handler for Panel {
                 let (x, y) = popup::point(lp, self.popup().scale());
                 if self.dragging.get() {
                     let (tops, _) = layout(&self.rows.borrow());
-                    if let Some((i, _)) = self.rows.borrow().iter().enumerate().find(|(_, r)| matches!(r, Row::Slider { .. })) {
+                    // Own statement: the borrow must end before rebuild() replaces the rows.
+                    let slider = self.rows.borrow().iter().position(|r| matches!(r, Row::Slider { .. }));
+                    if let Some(i) = slider {
                         let t = track(tops[i]);
                         self.set_volume(((x - t.left) / (t.right - t.left)).clamp(0.0, 1.0));
                         self.rebuild();
