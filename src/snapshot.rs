@@ -27,6 +27,7 @@ pub fn run(path: &str) -> Result<()> {
     let dwrite = gfx::dwrite()?;
     prefs_png(&path.replace(".png", "-prefs.png"), &dwrite)?;
     menu_png(&path.replace(".png", "-menu.png"), &dwrite)?;
+    panels_png(&path.replace(".png", "-panels.png"), &dwrite)?;
     let fonts = Fonts::new(&dwrite)?;
     let bar_h = theme::MENUBAR_HEIGHT;
     let gap = 12.0;
@@ -165,6 +166,54 @@ pub fn run(path: &str) -> Result<()> {
             ));
             draw_dock(dc, g, &l, &dock_items, palette)?;
             y += g.height() + grow(g) + 2.0 * gap;
+        }
+        Ok(())
+    })
+}
+
+/// Menu bar panels with sample data (no live audio or Wi-Fi calls): calendar,
+/// Wi-Fi, battery, volume; light on top, dark below.
+fn panels_png(path: &str, dwrite: &windows::Win32::Graphics::DirectWrite::IDWriteFactory) -> Result<()> {
+    use crate::panels::{self, Row};
+    let fonts = panels::Fonts::new(dwrite)?;
+    let nets = vec![
+        crate::wifi::Network { ssid: "Ev_5G".into(), quality: 92, secured: true, profile: Some("Ev_5G".into()), connected: true },
+        crate::wifi::Network { ssid: "Kafe Misafir".into(), quality: 55, secured: false, profile: None, connected: false },
+        crate::wifi::Network { ssid: "Komşu".into(), quality: 18, secured: true, profile: None, connected: false },
+    ];
+    let sets: Vec<Vec<Row>> = vec![
+        panels::calendar_rows(),
+        panels::wifi_rows(Some(true), &crate::wifi::Scan::Networks(nets), None),
+        panels::battery_rows(Some(status::Battery { percent: 64, plugged: false }), Some(3 * 3600 + 20 * 60), Some(crate::power::Mode::Balanced)),
+        panels::volume_rows(Some(status::Volume { level: 0.45, muted: false })),
+    ];
+    let heights: Vec<f32> = sets.iter().map(|r| panels::layout(r).1).collect();
+    let tallest = heights.iter().cloned().fold(0.0, f32::max);
+    let gap = 20.0;
+    let w = sets.len() as f32 * (panels::WIDTH + gap) + gap;
+    let h = 2.0 * (tallest + gap) + gap;
+    let now = clock::now();
+    render_png(path, w, h, |dc| unsafe {
+        let wall = dc.CreateSolidColorBrush(&WALLPAPER.d2d(), None)?;
+        dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: w, bottom: h }, &wall);
+        for (row_i, palette) in [theme::LIGHT, theme::DARK].into_iter().enumerate() {
+            for (i, rows) in sets.iter().enumerate() {
+                let (x, y) = (gap + i as f32 * (panels::WIDTH + gap), gap + row_i as f32 * (tallest + gap));
+                dc.SetTransform(&Matrix3x2::translation(x, y));
+                let bg = dc.CreateSolidColorBrush(&palette.popup.opaque().d2d(), None)?;
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: 0.0, top: 0.0, right: panels::WIDTH, bottom: heights[i] }, radiusX: 10.0, radiusY: 10.0 },
+                    &bg,
+                );
+                let view = panels::View {
+                    rows,
+                    hover: if i == 1 { Some(2) } else { None },
+                    month: (now.wYear as i32, now.wMonth as u32),
+                    today: (now.wYear as i32, now.wMonth as u32, now.wDay as u32),
+                    palette,
+                };
+                panels::draw(dc, dwrite, &fonts, &view)?;
+            }
         }
         Ok(())
     })

@@ -1089,6 +1089,9 @@ impl Dock {
                     },
                 ));
             }
+            // Always reachable: the empty dock edge is only a few pixels wide.
+            entries.push(menu::Entry::Separator);
+            entries.push(menu::Entry::item(SETTINGS, "Dock ayarları…"));
         } else {
             let st = settings::get();
             entries.push(menu::Entry::item(
@@ -1137,7 +1140,7 @@ impl Dock {
         let anchor_bottom = rc.top + ((above - 6.0) * s).round() as i32;
         self.hold(1); // stay out while the menu is open
         let dock: &'static Dock = unsafe { &*(self as *const Dock) };
-        menu::show(entries, anchor_x, anchor_bottom, move |id| match id {
+        menu::show(entries, anchor_x, popup::Place::Above(anchor_bottom), move |id| match id {
             NEW => {
                 if let Some((launch, _)) = &launch {
                     unsafe {

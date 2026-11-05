@@ -18,7 +18,7 @@ use crate::gfx::{self, Gfx, Label};
 use crate::status::{self, Icon, Sources};
 use crate::theme::{self, Palette};
 use crate::window::{self, Backdrop, Handler};
-use crate::{appbar, appid, clock, log};
+use crate::{appbar, appid, clock, log, menu, panels, popup};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 
 pub const CLASS: PCWSTR = w!("TaskbarMenuBar");
@@ -116,6 +116,23 @@ fn draw_logo(dc: &ID2D1DeviceContext, x: f32, h: f32, brush: &ID2D1SolidColorBru
 
 /// Draws bar content (not the background) in DIPs on a transparent target.
 /// Right side first: clock and status icons keep their place, the app name gets the rest.
+/// Clickable parts of the bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Hit {
+    Logo,
+    Clock,
+    Status(status::Kind),
+}
+
+/// Horizontal extent of a clickable part (DIPs).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Zone {
+    pub hit: Hit,
+    pub left: f32,
+    pub right: f32,
+}
+
+/// Draws the bar and returns where each clickable part ended up.
 pub fn draw(
     dc: &ID2D1DeviceContext,
     dwrite: &IDWriteFactory,
@@ -123,13 +140,16 @@ pub fn draw(
     st: &State,
     w: f32,
     h: f32,
-) -> Result<()> {
+) -> Result<Vec<Zone>> {
+    let mut zones = Vec::new();
     let brush = unsafe { dc.CreateSolidColorBrush(&st.palette.text.d2d(), None)? };
     let faint = unsafe { dc.CreateSolidColorBrush(&st.palette.faint.d2d(), None)? };
     let alert = unsafe { dc.CreateSolidColorBrush(&st.palette.alert.d2d(), None)? };
     let pad = theme::MENUBAR_PAD_X;
 
-    let left = pad + draw_logo(dc, pad, h, &brush) + theme::LOGO_TO_NAME;
+    let logo_w = draw_logo(dc, pad, h, &brush);
+    zones.push(Zone { hit: Hit::Logo, left: 0.0, right: pad + logo_w + theme::LOGO_TO_NAME / 2.0 });
+    let left = pad + logo_w + theme::LOGO_TO_NAME;
     let name_floor = left + theme::NAME_MIN_WIDTH;
 
     // Items are placed right to left; `edge` is the left ink edge of the last one,
@@ -137,6 +157,7 @@ pub fn draw(
     let clock = Label::new(dwrite, &st.clock, &fonts.text)?;
     let clock_x = w - pad - clock.width;
     clock.draw_text(dc, clock_x, h, fonts.cap, &brush);
+    zones.push(Zone { hit: Hit::Clock, left: clock_x - theme::CLOCK_GAP / 2.0, right: w });
     let mut edge = clock_x + clock.ink_left;
     let mut gap = theme::CLOCK_GAP;
 
@@ -169,6 +190,7 @@ pub fn draw(
             Label::new(dwrite, &under.to_string(), font)?.draw(dc, gx, h, &faint);
         }
         glyph.draw(dc, gx, h, if icon.alert { &alert } else { &brush });
+        zones.push(Zone { hit: Hit::Status(icon.kind), left: new_edge - gap / 2.0, right: edge - gap / 2.0 });
         edge = new_edge;
         gap = theme::MENUBAR_GAP;
     }
@@ -178,7 +200,7 @@ pub fn draw(
         Label::fitted(dwrite, &st.app_name, &fonts.bold, max)?
             .draw_text(dc, left, h, fonts.cap, &brush);
     }
-    Ok(())
+    Ok(zones)
 }
 
 struct Comp {
@@ -198,6 +220,7 @@ pub struct MenuBar {
     size: Cell<(i32, i32)>,
     state: RefCell<State>,
     comp: RefCell<Option<Comp>>,
+    zones: RefCell<Vec<Zone>>,
     sources: OnceCell<Sources>,
     status: Cell<status::Status>,
     /// Guards `place()`: the AppBar calls dispatch sent messages and can re-enter.
@@ -222,6 +245,7 @@ impl MenuBar {
                 palette,
             }),
             comp: RefCell::new(None),
+            zones: RefCell::new(Vec::new()),
             sources: OnceCell::new(),
             status: Cell::new(status::Status::default()),
             placing: Cell::new(false),
@@ -349,10 +373,32 @@ impl MenuBar {
         let (w, h) = self.size.get();
         let (wd, hd) = (w as f32 / scale, h as f32 / scale);
         if let Err(e) = self.gfx.draw(&c.surface, scale, |dc| {
-            draw(dc, &self.gfx.dwrite, &self.fonts, &st, wd, hd)
+            *self.zones.borrow_mut() = draw(dc, &self.gfx.dwrite, &self.fonts, &st, wd, hd)?;
+            Ok(())
         }) {
             log::error(&format!("menubar draw: {e}"));
         }
+    }
+
+    /// Opens the panel or menu of the part under `x` (client px), macOS style.
+    fn click(&self, x_px: i32) {
+        let s = theme::scale(self.dpi.get());
+        let x = x_px as f32 / s;
+        let Some(zone) = self.zones.borrow().iter().find(|z| x >= z.left && x < z.right).copied() else {
+            return;
+        };
+        let mut rc = RECT::default();
+        unsafe { _ = GetWindowRect(self.hwnd.get(), &mut rc) };
+        let centre = rc.left + (((zone.left + zone.right) / 2.0) * s).round() as i32;
+        let below = rc.bottom + (4.0 * s).round() as i32;
+        let kind = match zone.hit {
+            Hit::Logo => return system_menu(rc.left + (14.0 * s) as i32 + (130.0 * s) as i32, below),
+            Hit::Clock => panels::Kind::Calendar,
+            Hit::Status(status::Kind::Network) => panels::Kind::Wifi,
+            Hit::Status(status::Kind::Battery) => panels::Kind::Battery,
+            Hit::Status(status::Kind::Volume) => panels::Kind::Volume,
+        };
+        panels::toggle(kind, centre, below);
     }
 
     fn refresh_clock(&self) {
@@ -428,6 +474,7 @@ impl Handler for MenuBar {
     fn handle(&self, _: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_TIMER if wp.0 == TIMER_CLOCK => self.refresh_clock(),
+            WM_LBUTTONUP => self.click((lp.0 & 0xFFFF) as i16 as i32),
             WM_TIMECHANGE => self.refresh_clock(),
             WM_FOREGROUND => self.set_app(HWND(wp.0 as *mut _)),
             status::WM_STATUS => self.refresh_status(wp.0),
@@ -490,4 +537,60 @@ unsafe extern "system" fn on_foreground(
             )
         };
     }
+}
+
+/// Windows logo menu, in place of the Apple menu: about, settings, power.
+/// Power actions ask again in a second menu (no dialog, no sound).
+fn system_menu(x: i32, y: i32) {
+    use windows::Win32::System::Power::SetSuspendState;
+    use windows::Win32::System::Shutdown::LockWorkStation;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::core::HSTRING;
+    let open = |what: &str, args: Option<&str>, show: SHOW_WINDOW_CMD| unsafe {
+        let args = HSTRING::from(args.unwrap_or(""));
+        ShellExecuteW(None, w!("open"), &HSTRING::from(what), &args, None, show);
+    };
+    let entries = vec![
+        menu::Entry::item(1, "Bu bilgisayar hakkında"),
+        menu::Entry::Separator,
+        menu::Entry::item(2, "Sistem Ayarları…"),
+        menu::Entry::item(3, "Dock ayarları…"),
+        menu::Entry::item(4, "Görev Yöneticisi…"),
+        menu::Entry::Separator,
+        menu::Entry::item(5, "Uyku"),
+        menu::Entry::item(6, "Yeniden başlat…"),
+        menu::Entry::item(7, "Kapat…"),
+        menu::Entry::Separator,
+        menu::Entry::item(8, "Ekranı kilitle"),
+        menu::Entry::item(9, "Oturumu kapat…"),
+        menu::Entry::Separator,
+        menu::Entry::item(10, "Menü çubuğu ve Dock'tan çık"),
+    ];
+    menu::show(entries, x, popup::Place::Below(y), move |id| match id {
+        1 => open("ms-settings:about", None, SW_SHOWNORMAL),
+        2 => open("ms-settings:", None, SW_SHOWNORMAL),
+        3 => crate::prefs::open(),
+        4 => open("taskmgr.exe", None, SW_SHOWNORMAL),
+        5 => unsafe {
+            _ = SetSuspendState(false, false, false);
+        },
+        6 => confirm("Yeniden başlat", x, y, move || open("shutdown.exe", Some("/r /t 0"), SW_HIDE)),
+        7 => confirm("Kapat", x, y, move || open("shutdown.exe", Some("/s /t 0"), SW_HIDE)),
+        8 => unsafe {
+            _ = LockWorkStation();
+        },
+        9 => confirm("Oturumu kapat", x, y, move || open("shutdown.exe", Some("/l"), SW_HIDE)),
+        10 => crate::quit_running(),
+        _ => {}
+    });
+}
+
+/// Second step for actions that end the session: pick it again or cancel.
+fn confirm(action: &'static str, x: i32, y: i32, run: impl FnOnce() + 'static) {
+    let entries = vec![menu::Entry::item(1, format!("{action}: emin misiniz?")), menu::Entry::Separator, menu::Entry::item(2, action), menu::Entry::item(0, "Vazgeç")];
+    menu::show(entries, x, popup::Place::Below(y), move |id| {
+        if id == 2 {
+            run();
+        }
+    });
 }

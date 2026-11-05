@@ -20,6 +20,15 @@ use crate::theme;
 use crate::window::{self, Backdrop, Handler};
 
 pub const RADIUS: f32 = 10.0;
+
+/// Where a popup sits relative to its anchor (screen px).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Place {
+    /// Bottom edge at this y (dock menus and previews).
+    Above(i32),
+    /// Top edge at this y (menu bar panels).
+    Below(i32),
+}
 const APPEAR_MS: i64 = 120;
 
 struct Comp {
@@ -98,12 +107,12 @@ impl Popup {
         self.scale.get()
     }
 
-    /// Shows a `w` x `h` DIP popup centred on `anchor_x` with its bottom at
-    /// `anchor_bottom` (screen px), kept inside `monitor`.
+    /// Shows a `w` x `h` DIP popup centred on `anchor_x`, above or below
+    /// `place`, kept inside `monitor`.
     pub fn show(
         &self,
         anchor_x: i32,
-        anchor_bottom: i32,
+        place: Place,
         monitor: RECT,
         dpi: u32,
         w: f32,
@@ -116,7 +125,11 @@ impl Popup {
             monitor.left + 4,
             (monitor.right - wp - 4).max(monitor.left + 4),
         );
-        let y = (anchor_bottom - hp).max(monitor.top + 4);
+        let y = match place {
+            Place::Above(bottom) => (bottom - hp).max(monitor.top + 4),
+            Place::Below(top) => top.min(monitor.bottom - hp - 4),
+        };
+        let grow_from_top = matches!(place, Place::Below(_));
         let was_visible = self.visible();
         self.scale.set(s);
         self.size.set((wp, hp));
@@ -139,7 +152,7 @@ impl Popup {
         }
         self.redraw(draw);
         if !was_visible {
-            self.appear(wp, hp);
+            self.appear(wp, if grow_from_top { 0 } else { hp });
             unsafe {
                 _ = ShowWindow(
                     self.hwnd,
@@ -156,8 +169,8 @@ impl Popup {
         }
     }
 
-    /// Fade in while growing from 96 % around the bottom centre (macOS menus).
-    fn appear(&self, wp: i32, hp: i32) {
+    /// Fade in while growing from 96 % around the anchored edge's centre (macOS menus).
+    fn appear(&self, wp: i32, pivot_y: i32) {
         let comp = self.comp.borrow();
         let Some(c) = comp.as_ref() else { return };
         let comp_ = &self.gfx.compositor;
@@ -189,7 +202,7 @@ impl Popup {
             grow.SetDuration(duration)?;
             c.root.SetCenterPoint(Vector3 {
                 X: wp as f32 / 2.0,
-                Y: hp as f32,
+                Y: pivot_y as f32,
                 Z: 0.0,
             })?;
             c.root.StartAnimation(&HSTRING::from("Opacity"), &fade)?;

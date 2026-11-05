@@ -287,8 +287,7 @@ impl Preview {
         };
         self.size.set((w, h));
         let (ax, ab) = self.anchor.get();
-        self.popup()
-            .show(ax, ab, monitor, dpi, w, h, |dc| self.draw(dc));
+        self.popup().show(ax, popup::Place::Above(ab), monitor, dpi, w, h, |dc| self.draw(dc));
         // Thumbnails are composited by DWM on top of our content.
         for (sh, card) in self.shown.borrow().iter().zip(self.cards.borrow().iter()) {
             let r = card.thumb;

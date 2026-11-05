@@ -15,6 +15,7 @@ version = "0.62.2"
 features = [
     "Foundation",
     "System",
+    "Devices_Radios",
     "Graphics_DirectX",
     "Networking_Connectivity",
     "UI",
@@ -35,6 +36,7 @@ features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
     "Win32_NetworkManagement_WiFi",
     "Win32_Networking_WinSock",
     "Win32_Security",
@@ -50,6 +52,7 @@ features = [
     "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
+    "Win32_System_Shutdown",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_Variant",

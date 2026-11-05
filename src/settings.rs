@@ -137,6 +137,9 @@ pub fn update(change: impl FnOnce(&mut Settings)) {
         return;
     }
     save(&after);
+    let (b, a) = (format(&before), format(&after));
+    let changed: Vec<&str> = a.lines().filter(|l| !b.lines().any(|x| x == *l)).collect();
+    crate::log::info(&format!("settings: {}", changed.join(", ")));
     CURRENT.set(after.clone());
     // Listeners may call `get()`; the borrow above is already released.
     LISTENERS.with_borrow(|l| l.iter().for_each(|f| f(&before, &after)));

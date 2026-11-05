@@ -2,6 +2,7 @@
 
 mod appbar;
 mod appid;
+mod calendar;
 mod clock;
 mod dock;
 mod gfx;
@@ -10,7 +11,9 @@ mod log;
 mod magnify;
 mod menu;
 mod menubar;
+mod panels;
 mod popup;
+mod power;
 mod prefs;
 mod preview;
 mod settings;
@@ -18,6 +21,7 @@ mod shelltray;
 mod snapshot;
 mod status;
 mod theme;
+mod wifi;
 mod window;
 mod winlist;
 
@@ -89,6 +93,7 @@ fn run(hidden: bool, open_settings: bool) -> Result<()> {
     let dock = dock::Dock::create(gfx.clone(), hidden)?;
     prefs::init(gfx.clone())?;
     menu::init(gfx.clone())?;
+    panels::init(gfx.clone())?;
     preview::init(
         gfx,
         unsafe { FindWindowW(dock::CLASS, None) }.unwrap_or_default(),
@@ -125,7 +130,7 @@ fn run(hidden: bool, open_settings: bool) -> Result<()> {
 }
 
 /// `--quit`: asks the running instance to close cleanly (gives back the screen edge).
-fn quit_running() {
+pub(crate) fn quit_running() {
     // Dock first: the menu bar's WM_DESTROY ends the message loop.
     for class in [dock::CLASS, menubar::CLASS] {
         unsafe {

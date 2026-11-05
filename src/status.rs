@@ -82,11 +82,21 @@ pub struct Icon {
     pub percent: Option<u8>,
     /// Drawn in the alert colour (battery low and not charging).
     pub alert: bool,
+    /// Which panel a click opens.
+    pub kind: Kind,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Kind {
+    Network,
+    Battery,
+    Volume,
 }
 
 impl Icon {
-    fn plain(glyph: char) -> Self {
+    fn plain(glyph: char, kind: Kind) -> Self {
         Icon {
+            kind,
             glyph,
             under: None,
             size: IconSize::Normal,
@@ -149,13 +159,13 @@ pub fn icons(st: &Status, battery_percent: bool) -> Vec<Icon> {
     match st.net {
         Net::Wifi(s) => out.push(Icon {
             under: Some(WIFI_FULL),
-            ..Icon::plain(wifi_glyph(s))
+            ..Icon::plain(wifi_glyph(s), Kind::Network)
         }),
-        Net::Offline => out.push(Icon::plain('\u{EB5E}')),
-        Net::NoInternet { wifi: true } => out.push(Icon::plain('\u{EB63}')),
+        Net::Offline => out.push(Icon::plain('\u{EB5E}', Kind::Network)),
+        Net::NoInternet { wifi: true } => out.push(Icon::plain('\u{EB63}', Kind::Network)),
         Net::NoInternet { wifi: false } => out.push(Icon {
             size: IconSize::Small,
-            ..Icon::plain('\u{F384}')
+            ..Icon::plain('\u{F384}', Kind::Network)
         }),
         Net::Wired | Net::Unknown => {}
     }
@@ -166,11 +176,11 @@ pub fn icons(st: &Status, battery_percent: bool) -> Vec<Icon> {
             size: IconSize::Large,
             percent,
             alert,
-            ..Icon::plain(battery_glyph(b.percent, b.plugged))
+            ..Icon::plain(battery_glyph(b.percent, b.plugged), Kind::Battery)
         });
     }
     if let Some(v) = st.volume {
-        out.push(Icon::plain(volume_glyph(v.level, v.muted)));
+        out.push(Icon::plain(volume_glyph(v.level, v.muted), Kind::Volume));
     }
     out
 }

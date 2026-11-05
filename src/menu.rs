@@ -227,12 +227,12 @@ pub fn visible() -> bool {
         .is_some_and(Popup::visible)
 }
 
-/// Opens the menu above `anchor_x`/`anchor_bottom` (screen px). `on_pick` gets
-/// the chosen id; it is dropped when the menu closes without a pick.
+/// Opens the menu at `anchor_x` above or below `place` (screen px). `on_pick`
+/// gets the chosen id; it is dropped when the menu closes without a pick.
 pub fn show(
     entries: Vec<Entry>,
     anchor_x: i32,
-    anchor_bottom: i32,
+    place: popup::Place,
     on_pick: impl FnOnce(u32) + 'static,
 ) {
     let Some(m) = MENU.with(|m| m.get().copied()) else {
@@ -256,7 +256,7 @@ pub fn show(
     if let Some(p) = m.popup.get() {
         p.show(
             anchor_x,
-            anchor_bottom,
+            place,
             monitor,
             dpi,
             m.width.get(),
