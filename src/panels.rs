@@ -37,6 +37,12 @@ const SWITCH_H: f32 = 20.0;
 const KNOB: f32 = 18.0;
 const LOCK: char = '\u{E72E}';
 const WIFI_FULL: char = '\u{E701}';
+/// Drawn, not a glyph: half-filled circle (macOS Dark Mode mark).
+const DARK_MODE: char = '\u{25D0}';
+/// Control Center tiles: inset from the panel edge, corner radius.
+const TILE_INSET: f32 = 10.0;
+const TILE_R: f32 = 12.0;
+const CARD_H: f32 = 68.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
@@ -70,8 +76,12 @@ pub enum Row {
     Big(String),
     Note(String),
     Slider { icon: char, value: f32, act: Act },
-    /// Control Center tile: round icon (accent when on), label and state.
-    Toggle { icon: char, label: String, on: bool, act: Act },
+    /// Control Center switch: round icon (accent when on), label and state.
+    /// Consecutive ones share one tile.
+    Toggle { icon: char, label: String, state: String, on: bool, act: Act },
+    /// Control Center tile with a title and a wide capsule slider (Display, Sound).
+    Card { title: String, icon: char, value: f32, act: Act },
+    Gap(f32),
     /// `badge`: small glyph right of the label (lock on secured networks).
     Choice { icon: Option<char>, label: String, badge: Option<char>, checked: bool, act: Act },
     Separator,
@@ -87,6 +97,8 @@ impl Row {
             Row::Note(_) => 24.0,
             Row::Slider { .. } => 38.0,
             Row::Toggle { .. } => 46.0,
+            Row::Card { .. } => CARD_H,
+            Row::Gap(h) => *h,
             Row::Choice { .. } | Row::Link { .. } => 30.0,
             Row::Separator => 9.0,
             Row::Calendar => CAL_HEAD + CAL_DAYS + 6.0 * CELL_H + 4.0,
@@ -121,6 +133,27 @@ fn track(top: f32) -> D2D_RECT_F {
     D2D_RECT_F { left: 44.0, top: mid - 2.0, right: WIDTH - SIDE - KNOB / 2.0, bottom: mid + 2.0 }
 }
 
+/// Capsule track of a Control Center card.
+fn card_track(top: f32) -> D2D_RECT_F {
+    D2D_RECT_F { left: TILE_INSET + 12.0, top: top + 36.0, right: WIDTH - TILE_INSET - 12.0, bottom: top + 58.0 }
+}
+
+fn track_of(row: &Row, top: f32) -> D2D_RECT_F {
+    match row {
+        Row::Card { .. } => card_track(top),
+        _ => track(top),
+    }
+}
+
+/// Slider value under `x` for a track; card capsules keep the knob inside.
+fn slider_at(row: &Row, t: D2D_RECT_F, x: f32) -> f32 {
+    let (l, r) = match row {
+        Row::Card { .. } => (t.left + 11.0, t.right - 11.0),
+        _ => (t.left, t.right),
+    };
+    ((x - l) / (r - l)).clamp(0.0, 1.0)
+}
+
 fn switch_rect(top: f32) -> D2D_RECT_F {
     let mid = top + 18.0;
     D2D_RECT_F { left: WIDTH - SIDE - SWITCH_W, top: mid - SWITCH_H / 2.0, right: WIDTH - SIDE, bottom: mid + SWITCH_H / 2.0 }
@@ -137,6 +170,8 @@ pub fn hit(rows: &[Row], x: f32, y: f32) -> Option<(usize, Part)> {
             let t = track(top);
             Part::Slider(((x - t.left) / (t.right - t.left)).clamp(0.0, 1.0))
         }
+        Row::Card { act: Act::Volume, .. } if x < card_track(top).left + 24.0 => Part::SliderIcon,
+        Row::Card { .. } => Part::Slider(slider_at(&rows[i], card_track(top), x)),
         Row::Calendar if y < top + CAL_HEAD && x >= WIDTH - SIDE - 24.0 => Part::CalNext,
         Row::Calendar if y < top + CAL_HEAD && x >= WIDTH - SIDE - 52.0 => Part::CalPrev,
         Row::Calendar if y < top + CAL_HEAD => Part::CalTitle,
@@ -214,27 +249,36 @@ pub fn volume_rows(volume: Option<status::Volume>) -> Vec<Row> {
     rows
 }
 
-pub fn control_rows(wifi: Option<bool>, bluetooth: Option<bool>, dark: bool, brightness: Option<u8>, volume: Option<status::Volume>) -> Vec<Row> {
-    let toggle = |icon, label: &str, on, act| Row::Toggle { icon, label: label.into(), on, act };
-    let mut rows = Vec::new();
+/// macOS Control Center: a tile of switches, then Display and Sound tiles.
+/// `network`: connected Wi-Fi name, shown under Wi-Fi like macOS.
+pub fn control_rows(
+    wifi: Option<bool>,
+    network: Option<&str>,
+    bluetooth: Option<bool>,
+    dark: bool,
+    brightness: Option<u8>,
+    volume: Option<status::Volume>,
+) -> Vec<Row> {
+    let on_off = |on: bool| if on { "Açık" } else { "Kapalı" }.to_string();
+    let toggle = |icon, label: &str, state: String, on, act| Row::Toggle { icon, label: label.into(), state, on, act };
+    let mut rows = vec![Row::Gap(6.0)];
     if let Some(on) = wifi {
-        rows.push(toggle(WIFI_FULL, "Wi-Fi", on, Act::WifiToggle));
+        let state = network.filter(|_| on).map_or_else(|| on_off(on), str::to_string);
+        rows.push(toggle(WIFI_FULL, "Wi-Fi", state, on, Act::WifiToggle));
     }
     if let Some(on) = bluetooth {
-        rows.push(toggle('\u{E702}', "Bluetooth", on, Act::BluetoothToggle));
+        rows.push(toggle('\u{E702}', "Bluetooth", on_off(on), on, Act::BluetoothToggle));
     }
-    rows.push(toggle('\u{E708}', "Koyu mod", dark, Act::DarkToggle));
+    rows.push(toggle(DARK_MODE, "Koyu mod", on_off(dark), dark, Act::DarkToggle));
+    rows.push(Row::Gap(14.0));
     if let Some(b) = brightness {
-        rows.push(Row::Separator);
-        rows.push(Row::Note("Ekran".into()));
-        rows.push(Row::Slider { icon: '\u{E706}', value: b as f32 / 100.0, act: Act::Brightness });
+        rows.push(Row::Card { title: "Ekran".into(), icon: '\u{E706}', value: b as f32 / 100.0, act: Act::Brightness });
+        rows.push(Row::Gap(10.0));
     }
     if let Some(v) = volume {
-        rows.push(Row::Separator);
-        rows.push(Row::Note("Ses".into()));
-        rows.push(Row::Slider { icon: status::volume_glyph(v.level, v.muted), value: v.level, act: Act::Volume });
+        rows.push(Row::Card { title: "Ses".into(), icon: status::volume_glyph(v.level, v.muted), value: v.level, act: Act::Volume });
+        rows.push(Row::Gap(10.0));
     }
-    rows.push(Row::Separator);
     rows.push(Row::link("Hızlı ayarlar…", Act::Open("ms-actioncenter:controlcenter/&showFooter=true")));
     rows
 }
@@ -319,18 +363,52 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &Vie
                     let y = top + 4.5;
                     dc.FillRectangle(&D2D_RECT_F { left: SIDE, top: y - 0.5, right: WIDTH - SIDE, bottom: y + 0.5 }, &line);
                 }
-                Row::Toggle { icon, label, on, .. } => {
-                    if hot {
-                        dc.FillRoundedRectangle(&rr(body, 8.0), &hover);
+                Row::Toggle { icon, label, state, on, .. } => {
+                    // One tile behind a run of switches, drawn with the first one.
+                    if i == 0 || !matches!(v.rows[i - 1], Row::Toggle { .. }) {
+                        let last = (i..v.rows.len()).take_while(|j| matches!(v.rows[*j], Row::Toggle { .. })).last().unwrap_or(i);
+                        let tile = D2D_RECT_F { left: TILE_INSET, top: top - 4.0, right: WIDTH - TILE_INSET, bottom: tops[last] + v.rows[last].height() + 4.0 };
+                        draw_tile(dc, tile, p.text)?;
                     }
-                    let (cx, cy) = (SIDE + 14.0, top + row.height() / 2.0);
-                    dc.FillEllipse(&circle(cx, cy, 14.0), &brush(if *on { accent_c } else { track_c })?);
+                    let (cx, cy) = (TILE_INSET + 10.0 + 14.0, top + row.height() / 2.0);
+                    // Hover lifts the circle, as macOS does, instead of a row highlight.
+                    let fill = match (*on, hot) {
+                        (true, _) => accent_c,
+                        (false, true) => Rgba(track_c.0, track_c.1, track_c.2, track_c.3.saturating_add(24)),
+                        (false, false) => track_c,
+                    };
+                    dc.FillEllipse(&circle(cx, cy, 14.0), &brush(fill)?);
+                    let ink = if *on { &white } else { &text };
+                    if *icon == DARK_MODE {
+                        let ring = circle(cx, cy, 6.5);
+                        dc.DrawEllipse(&ring, ink, 1.3, None);
+                        dc.PushAxisAlignedClip(&D2D_RECT_F { left: cx - 7.0, top: cy - 7.0, right: cx, bottom: cy + 7.0 }, D2D1_ANTIALIAS_MODE_ALIASED);
+                        dc.FillEllipse(&ring, ink);
+                        dc.PopAxisAlignedClip();
+                    } else {
+                        let g = Label::new(dwrite, &icon.to_string(), &f.icons)?;
+                        g.draw(dc, cx - g.width / 2.0, cy * 2.0, ink);
+                    }
+                    let x = cx + 24.0;
+                    let max = WIDTH - TILE_INSET - 12.0 - x;
+                    Label::fitted(dwrite, label, &f.bold, max)?.draw_text(dc, x, (top + 4.0) * 2.0 + 20.0, f.cap, &text);
+                    Label::fitted(dwrite, state, &f.small, max)?.draw_text(dc, x, (top + 22.0) * 2.0 + 18.0, small_cap, &secondary);
+                }
+                Row::Gap(_) => {}
+                Row::Card { title, icon, value, .. } => {
+                    let tile = D2D_RECT_F { left: TILE_INSET, top, right: WIDTH - TILE_INSET, bottom: top + CARD_H };
+                    draw_tile(dc, tile, p.text)?;
+                    Label::new(dwrite, title, &f.bold)?.draw_text(dc, TILE_INSET + 12.0, (top + 8.0) * 2.0 + 20.0, f.cap, &text);
+                    // macOS capsule: white fill up to a white knob, icon inside the track.
+                    let t = card_track(top);
+                    let ky = (t.top + t.bottom) / 2.0;
+                    let kc = t.left + 11.0 + value.clamp(0.0, 1.0) * (t.right - t.left - 22.0);
+                    dc.FillRoundedRectangle(&rr(t, 11.0), &brush(Rgba(p.text.0, p.text.1, p.text.2, 26))?);
+                    dc.FillRoundedRectangle(&rr(D2D_RECT_F { right: kc + 11.0, ..t }, 11.0), &white);
+                    dc.FillEllipse(&circle(kc, ky + 0.75, 11.0), &brush(Rgba(0, 0, 0, 60))?);
+                    dc.FillEllipse(&circle(kc, ky, 11.0), &white);
                     let g = Label::new(dwrite, &icon.to_string(), &f.small_icons)?;
-                    g.draw(dc, cx - g.width / 2.0, cy * 2.0, if *on { &white } else { &text });
-                    let x = SIDE + 38.0;
-                    Label::new(dwrite, label, &f.bold)?.draw_text(dc, x, (top + 4.0) * 2.0 + 20.0, f.cap, &text);
-                    let state = if *on { "Açık" } else { "Kapalı" };
-                    Label::new(dwrite, state, &f.small)?.draw_text(dc, x, (top + 22.0) * 2.0 + 18.0, small_cap, &secondary);
+                    g.draw(dc, t.left + 6.0, ky * 2.0, &brush(Rgba(0, 0, 0, 140))?);
                 }
                 Row::Slider { icon, value, .. } => {
                     Label::new(dwrite, &icon.to_string(), &f.icons)?.draw(dc, SIDE, band, &text);
@@ -376,6 +454,17 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &Vie
                 Row::Calendar => draw_calendar(dc, dwrite, f, v, top, &text, &secondary, &accent, &white)?,
             }
         }
+    }
+    Ok(())
+}
+
+/// Control Center tile: faint fill and hairline border from the text colour.
+unsafe fn draw_tile(dc: &ID2D1DeviceContext, r: D2D_RECT_F, text: Rgba) -> Result<()> {
+    unsafe {
+        let fill = dc.CreateSolidColorBrush(&Rgba(text.0, text.1, text.2, 14).d2d(), None)?;
+        let edge = dc.CreateSolidColorBrush(&Rgba(text.0, text.1, text.2, 20).d2d(), None)?;
+        dc.FillRoundedRectangle(&rr(r, TILE_R), &fill);
+        dc.DrawRoundedRectangle(&rr(r, TILE_R), &edge, 0.5, None);
     }
     Ok(())
 }
@@ -516,6 +605,7 @@ impl Panel {
             Kind::Volume => volume_rows(self.read_volume()),
             Kind::Control => control_rows(
                 wifi::radio_on(),
+                wifi::current_name().as_deref(),
                 wifi::bluetooth_on(),
                 theme::system_dark(),
                 crate::brightness::get(),
@@ -578,7 +668,9 @@ impl Panel {
     /// (brightness is read through WMI, too slow for every mouse move).
     fn move_slider(&self, act: Act, t: f32) {
         let mut rows = self.rows.borrow_mut();
-        if let Some(Row::Slider { value, .. }) = rows.iter_mut().find(|r| matches!(r, Row::Slider { act: a, .. } if *a == act)) {
+        if let Some(Row::Slider { value, .. } | Row::Card { value, .. }) =
+            rows.iter_mut().find(|r| matches!(r, Row::Slider { act: a, .. } | Row::Card { act: a, .. } if *a == act))
+        {
             *value = t;
         }
         drop(rows);
@@ -633,8 +725,8 @@ impl Panel {
         let Some((i, part)) = hit(&rows, x, y) else { return };
         match (&rows[i], part) {
             (Row::Header { switch: Some(_), .. }, Part::Switch) => self.act(Act::WifiToggle),
-            (Row::Slider { act: Act::Volume, .. }, Part::SliderIcon) => self.act(Act::Mute),
-            (Row::Slider { act, .. }, Part::Slider(t)) => {
+            (Row::Slider { act: Act::Volume, .. } | Row::Card { act: Act::Volume, .. }, Part::SliderIcon) => self.act(Act::Mute),
+            (Row::Slider { act, .. } | Row::Card { act, .. }, Part::Slider(t)) => {
                 self.dragging.set(Some(*act));
                 unsafe { SetCapture(self.popup().hwnd) };
                 self.set_value(*act, t);
@@ -665,10 +757,10 @@ impl Handler for Panel {
                 if let Some(act) = self.dragging.get() {
                     let (tops, _) = layout(&self.rows.borrow());
                     // Own statement: the borrow must end before the rows change.
-                    let slider = self.rows.borrow().iter().position(|r| matches!(r, Row::Slider { act: a, .. } if *a == act));
+                    let slider = self.rows.borrow().iter().position(|r| matches!(r, Row::Slider { act: a, .. } | Row::Card { act: a, .. } if *a == act));
                     if let Some(i) = slider {
-                        let t = track(tops[i]);
-                        let v = ((x - t.left) / (t.right - t.left)).clamp(0.0, 1.0);
+                        let row = self.rows.borrow()[i].clone();
+                        let v = slider_at(&row, track_of(&row, tops[i]), x);
                         self.set_value(act, v);
                         self.move_slider(act, v);
                     }

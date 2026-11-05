@@ -450,6 +450,15 @@ pub fn draw(
                     let segs = segments(row);
                     let whole = rect(segs[0].1.left, segs[0].1.top, segs[2].1.right, segs[0].1.bottom);
                     dc.FillRoundedRectangle(&rounded(whole, 7.0), &brush(p.track)?);
+                    let sel = DockSide::ALL.iter().position(|d| *d == v.settings.dock_side).unwrap_or(1);
+                    // Dividers only between two unselected segments (macOS).
+                    for k in 1..segs.len() {
+                        if k != sel && k - 1 != sel {
+                            let x = segs[k].1.left;
+                            let mid = (whole.top + whole.bottom) / 2.0;
+                            dc.FillRectangle(&rect(x - 0.5, mid - 6.0, x + 0.5, mid + 6.0), &brush(Rgba(p.text.0, p.text.1, p.text.2, 40))?);
+                        }
+                    }
                     for (d, r) in segs {
                         let on = d == v.settings.dock_side;
                         if on {
@@ -460,9 +469,8 @@ pub fn draw(
                             let fill = if dark { Rgba(99, 99, 102, 255) } else { p.knob };
                             dc.FillRoundedRectangle(&rounded(rect(pill.left, pill.top, pill.right, pill.bottom - 0.5), 5.0), &brush(fill)?);
                         }
-                        let l = Label::new(dwrite, d.label(), &fonts.small)?;
-                        let b = brush(if on { p.text } else { p.secondary })?;
-                        l.draw_text(dc, (r.left + r.right - l.width) / 2.0, r.top + r.bottom, fonts.cap * 11.0 / 13.0, &b);
+                        let l = Label::new(dwrite, d.label(), &fonts.text)?;
+                        l.draw_text(dc, (r.left + r.right - l.width) / 2.0, r.top + r.bottom, fonts.cap, &brush(p.text)?);
                     }
                     if focused {
                         let ring = rect(whole.left - 3.0, whole.top - 3.0, whole.right + 3.0, whole.bottom + 3.0);

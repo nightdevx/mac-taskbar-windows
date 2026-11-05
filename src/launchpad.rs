@@ -269,12 +269,14 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &Vie
         let pill = |b: Button, label: &str, strong: bool| -> Result<()> {
             let r = button_rect(w, h, b);
             let fill = if strong { &accent } else { &field };
-            dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: PILL_H / 2.0, radiusY: PILL_H / 2.0 }, fill);
+            // Same corner as the search field next to them.
+            dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: 8.0, radiusY: 8.0 }, fill);
             let l = Label::fitted(dwrite, label, &f.text, r.right - r.left - 20.0)?;
-            l.draw_text(dc, (r.left + r.right - l.width) / 2.0, r.top + r.bottom, f.cap, &white);
+            let ink = if b == Button::Apply && !strong { &dim } else { &white };
+            l.draw_text(dc, (r.left + r.right - l.width) / 2.0, r.top + r.bottom, f.cap, ink);
             Ok(())
         };
-        pill(Button::Edit, if v.editing { "Bitti" } else { "Düzenle" }, v.editing)?;
+        pill(Button::Edit, if v.editing { "Bitti" } else { "Düzenle" }, false)?;
         if v.editing {
             let k = v.selected.len();
             let label = if v.show_hidden { format!("Göster ({k})") } else { format!("Gizle ({k})") };

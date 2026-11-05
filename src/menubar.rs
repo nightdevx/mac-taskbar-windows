@@ -173,6 +173,18 @@ pub fn draw(
     let mut gap = theme::CLOCK_GAP;
 
     for icon in &st.status {
+        if icon.kind == status::Kind::Control {
+            let w = 15.0;
+            let gx = edge - gap - w;
+            if gx - theme::MENUBAR_GAP < name_floor {
+                break;
+            }
+            draw_control_mark(dc, gx, h, &brush)?;
+            zones.push(Zone { hit: Hit::Status(icon.kind), left: gx - gap / 2.0, right: edge - gap / 2.0 });
+            edge = gx;
+            gap = theme::MENUBAR_GAP;
+            continue;
+        }
         let font = match icon.size {
             status::IconSize::Small => &fonts.icons_small,
             status::IconSize::Normal => &fonts.icons,
@@ -830,4 +842,19 @@ fn is_desktop(hwnd: HWND) -> bool {
     let mut buf = [0u16; 16];
     let n = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
     matches!(String::from_utf16_lossy(&buf[..n]).as_str(), "Progman" | "WorkerW")
+}
+
+/// macOS Control Center mark: two switch capsules, knobs at opposite ends.
+fn draw_control_mark(dc: &ID2D1DeviceContext, x: f32, bar_h: f32, ink: &ID2D1SolidColorBrush) -> Result<()> {
+    let cy = (bar_h / 2.0).round();
+    for (top, knob_x) in [(cy - 7.0, x + 3.5), (cy + 1.0, x + 11.5)] {
+        let r = D2D_RECT_F { left: x + 0.6, top: top + 0.6, right: x + 14.4, bottom: top + 5.4 };
+        let capsule = D2D1_ROUNDED_RECT { rect: r, radiusX: 2.4, radiusY: 2.4 };
+        let knob = D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: knob_x, Y: top + 3.0 }, radiusX: 2.2, radiusY: 2.2 };
+        unsafe {
+            dc.DrawRoundedRectangle(&capsule, ink, 1.2, None);
+            dc.FillEllipse(&knob, ink);
+        }
+    }
+    Ok(())
 }
