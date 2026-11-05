@@ -142,19 +142,36 @@ pub fn current_name() -> Option<String> {
     p.ProfileName().ok().map(|n| n.to_string())
 }
 
-fn wifi_radio() -> Option<Radio> {
+fn radio(kind: RadioKind) -> Option<Radio> {
     let radios = Radio::GetRadiosAsync().ok()?.join().ok()?;
-    radios.into_iter().find(|r| r.Kind().is_ok_and(|k| k == RadioKind::WiFi))
+    radios.into_iter().find(|r| r.Kind().is_ok_and(|k| k == kind))
+}
+
+fn radio_state(kind: RadioKind) -> Option<bool> {
+    radio(kind)?.State().ok().map(|s| s == RadioState::On)
+}
+
+fn set_radio_state(kind: RadioKind, on: bool) -> bool {
+    let Some(radio) = radio(kind) else { return false };
+    let state = if on { RadioState::On } else { RadioState::Off };
+    radio.SetStateAsync(state).ok().and_then(|op| op.join().ok()).is_some()
 }
 
 pub fn radio_on() -> Option<bool> {
-    wifi_radio()?.State().ok().map(|s| s == RadioState::On)
+    radio_state(RadioKind::WiFi)
 }
 
 pub fn set_radio(on: bool) -> bool {
-    let Some(radio) = wifi_radio() else { return false };
-    let state = if on { RadioState::On } else { RadioState::Off };
-    radio.SetStateAsync(state).ok().and_then(|op| op.join().ok()).is_some()
+    set_radio_state(RadioKind::WiFi, on)
+}
+
+/// Bluetooth radio (kept with the Wi-Fi one): `None` without an adapter.
+pub fn bluetooth_on() -> Option<bool> {
+    radio_state(RadioKind::Bluetooth)
+}
+
+pub fn set_bluetooth(on: bool) -> bool {
+    set_radio_state(RadioKind::Bluetooth, on)
 }
 
 #[cfg(test)]

@@ -170,3 +170,31 @@ mod tests {
         assert_eq!(px(MENUBAR_HEIGHT, 168), 49);
     }
 }
+
+/// Windows-wide dark mode (system and apps), as the macOS Control Center toggle.
+pub fn system_dark() -> bool {
+    personalize_flag(w!("SystemUsesLightTheme")) == Some(false)
+}
+
+pub fn set_dark(dark: bool) {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::System::Registry::{REG_DWORD, RegSetKeyValueW};
+    use windows::Win32::UI::WindowsAndMessaging::{HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE};
+    let light: u32 = if dark { 0 } else { 1 };
+    let key = w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    unsafe {
+        for name in [w!("SystemUsesLightTheme"), w!("AppsUseLightTheme")] {
+            _ = RegSetKeyValueW(HKEY_CURRENT_USER, key, name, REG_DWORD.0, Some(&light as *const u32 as *const _), 4);
+        }
+        // Apps (and our own bars) repaint on this broadcast.
+        _ = SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            WPARAM(0),
+            LPARAM(w!("ImmersiveColorSet").0 as isize),
+            SMTO_ABORTIFHUNG,
+            200,
+            None,
+        );
+    }
+}

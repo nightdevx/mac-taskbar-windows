@@ -88,6 +88,8 @@ pub struct Icon {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
+    /// Control Center (two switches), always shown, next to the clock.
+    Control,
     Network,
     Battery,
     Volume,
@@ -154,8 +156,11 @@ pub fn wifi_glyph(bars: u8) -> char {
 
 /// Icons from right to left, macOS order: network, battery, volume.
 /// Wired with internet shows nothing, as on macOS.
+/// Segoe Fluent "Equalizer": vertical sliders, closest to the macOS Control Center mark.
+pub const CONTROL_CENTER: char = '\u{E9E9}';
+
 pub fn icons(st: &Status, battery_percent: bool) -> Vec<Icon> {
-    let mut out = Vec::new();
+    let mut out = vec![Icon::plain(CONTROL_CENTER, Kind::Control)];
     match st.net {
         Net::Wifi(s) => out.push(Icon {
             under: Some(WIFI_FULL),
@@ -450,7 +455,7 @@ mod tests {
                 battery: Some(Battery { percent, plugged }),
                 ..Status::default()
             };
-            icons(&st, true)[0].alert
+            icons(&st, true)[1].alert // [0] is Control Center
         };
         assert!(at(10, false));
         assert!(at(3, false));
@@ -495,20 +500,21 @@ mod tests {
         assert_eq!(
             glyphs,
             [
+                CONTROL_CENTER,
                 WIFI_FULL,
                 battery_glyph(50, false),
                 volume_glyph(0.5, false)
             ]
         );
-        assert_eq!(all[1].percent, Some(50));
+        assert_eq!(all[2].percent, Some(50));
         assert_eq!(
-            (all[0].size, all[1].size),
+            (all[1].size, all[2].size),
             (IconSize::Normal, IconSize::Large)
         );
-        assert_eq!(all[0].under, Some(WIFI_FULL));
-        assert!(!all[1].alert);
+        assert_eq!(all[1].under, Some(WIFI_FULL));
+        assert!(!all[2].alert);
         assert_eq!(
-            icons(&st, false)[1].percent,
+            icons(&st, false)[2].percent,
             None,
             "percentage can be turned off"
         );
@@ -516,15 +522,15 @@ mod tests {
             net: Net::Wired,
             ..st
         };
-        assert_eq!(icons(&wired, true).len(), 2);
-        assert!(icons(&Status::default(), true).is_empty());
+        assert_eq!(icons(&wired, true).len(), 3);
+        assert_eq!(icons(&Status::default(), true).len(), 1, "only Control Center");
         let wifi_warn = icons(
             &Status {
                 net: Net::NoInternet { wifi: true },
                 ..Status::default()
             },
             true,
-        )[0];
+        )[1];
         assert_eq!(
             (wifi_warn.glyph, wifi_warn.size),
             ('\u{EB63}', IconSize::Normal)
@@ -535,7 +541,7 @@ mod tests {
                 ..Status::default()
             },
             true,
-        )[0];
+        )[1];
         assert_eq!((globe.glyph, globe.size), ('\u{F384}', IconSize::Small));
     }
 }

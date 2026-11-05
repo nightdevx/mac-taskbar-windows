@@ -44,9 +44,12 @@ pub enum Kind {
     Wifi,
     Battery,
     Volume,
+    /// macOS Control Center: radios, dark mode, display and sound.
+    Control,
 }
 
 /// What clicking a row does.
+/// `Volume` and `Brightness` tag sliders: their value comes from the drag.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Act {
     None,
@@ -55,6 +58,10 @@ pub enum Act {
     WifiConnect(usize),
     Power(power::Mode),
     Mute,
+    BluetoothToggle,
+    DarkToggle,
+    Volume,
+    Brightness,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,7 +69,9 @@ pub enum Row {
     Header { title: String, switch: Option<bool> },
     Big(String),
     Note(String),
-    Slider { icon: char, value: f32 },
+    Slider { icon: char, value: f32, act: Act },
+    /// Control Center tile: round icon (accent when on), label and state.
+    Toggle { icon: char, label: String, on: bool, act: Act },
     /// `badge`: small glyph right of the label (lock on secured networks).
     Choice { icon: Option<char>, label: String, badge: Option<char>, checked: bool, act: Act },
     Separator,
@@ -77,6 +86,7 @@ impl Row {
             Row::Big(_) => 40.0,
             Row::Note(_) => 24.0,
             Row::Slider { .. } => 38.0,
+            Row::Toggle { .. } => 46.0,
             Row::Choice { .. } | Row::Link { .. } => 30.0,
             Row::Separator => 9.0,
             Row::Calendar => CAL_HEAD + CAL_DAYS + 6.0 * CELL_H + 4.0,
@@ -130,7 +140,7 @@ pub fn hit(rows: &[Row], x: f32, y: f32) -> Option<(usize, Part)> {
         Row::Calendar if y < top + CAL_HEAD && x >= WIDTH - SIDE - 24.0 => Part::CalNext,
         Row::Calendar if y < top + CAL_HEAD && x >= WIDTH - SIDE - 52.0 => Part::CalPrev,
         Row::Calendar if y < top + CAL_HEAD => Part::CalTitle,
-        Row::Choice { .. } | Row::Link { .. } | Row::Calendar => Part::Body,
+        Row::Choice { .. } | Row::Link { .. } | Row::Toggle { .. } | Row::Calendar => Part::Body,
         _ => return None,
     };
     Some((i, part))
@@ -196,11 +206,36 @@ pub fn battery_rows(battery: Option<status::Battery>, remaining: Option<u32>, mo
 pub fn volume_rows(volume: Option<status::Volume>) -> Vec<Row> {
     let mut rows = vec![Row::Header { title: "Ses".into(), switch: None }];
     match volume {
-        Some(v) => rows.push(Row::Slider { icon: status::volume_glyph(v.level, v.muted), value: v.level }),
+        Some(v) => rows.push(Row::Slider { icon: status::volume_glyph(v.level, v.muted), value: v.level, act: Act::Volume }),
         None => rows.push(Row::Note("Çıkış aygıtı yok".into())),
     }
     rows.push(Row::Separator);
     rows.push(Row::link("Ses ayarları…", Act::Open("ms-settings:sound")));
+    rows
+}
+
+pub fn control_rows(wifi: Option<bool>, bluetooth: Option<bool>, dark: bool, brightness: Option<u8>, volume: Option<status::Volume>) -> Vec<Row> {
+    let toggle = |icon, label: &str, on, act| Row::Toggle { icon, label: label.into(), on, act };
+    let mut rows = Vec::new();
+    if let Some(on) = wifi {
+        rows.push(toggle(WIFI_FULL, "Wi-Fi", on, Act::WifiToggle));
+    }
+    if let Some(on) = bluetooth {
+        rows.push(toggle('\u{E702}', "Bluetooth", on, Act::BluetoothToggle));
+    }
+    rows.push(toggle('\u{E708}', "Koyu mod", dark, Act::DarkToggle));
+    if let Some(b) = brightness {
+        rows.push(Row::Separator);
+        rows.push(Row::Note("Ekran".into()));
+        rows.push(Row::Slider { icon: '\u{E706}', value: b as f32 / 100.0, act: Act::Brightness });
+    }
+    if let Some(v) = volume {
+        rows.push(Row::Separator);
+        rows.push(Row::Note("Ses".into()));
+        rows.push(Row::Slider { icon: status::volume_glyph(v.level, v.muted), value: v.level, act: Act::Volume });
+    }
+    rows.push(Row::Separator);
+    rows.push(Row::link("Hızlı ayarlar…", Act::Open("ms-actioncenter:controlcenter/&showFooter=true")));
     rows
 }
 
@@ -284,7 +319,20 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, f: &Fonts, v: &Vie
                     let y = top + 4.5;
                     dc.FillRectangle(&D2D_RECT_F { left: SIDE, top: y - 0.5, right: WIDTH - SIDE, bottom: y + 0.5 }, &line);
                 }
-                Row::Slider { icon, value } => {
+                Row::Toggle { icon, label, on, .. } => {
+                    if hot {
+                        dc.FillRoundedRectangle(&rr(body, 8.0), &hover);
+                    }
+                    let (cx, cy) = (SIDE + 14.0, top + row.height() / 2.0);
+                    dc.FillEllipse(&circle(cx, cy, 14.0), &brush(if *on { accent_c } else { track_c })?);
+                    let g = Label::new(dwrite, &icon.to_string(), &f.small_icons)?;
+                    g.draw(dc, cx - g.width / 2.0, cy * 2.0, if *on { &white } else { &text });
+                    let x = SIDE + 38.0;
+                    Label::new(dwrite, label, &f.bold)?.draw_text(dc, x, (top + 4.0) * 2.0 + 20.0, f.cap, &text);
+                    let state = if *on { "Açık" } else { "Kapalı" };
+                    Label::new(dwrite, state, &f.small)?.draw_text(dc, x, (top + 22.0) * 2.0 + 18.0, small_cap, &secondary);
+                }
+                Row::Slider { icon, value, .. } => {
                     Label::new(dwrite, &icon.to_string(), &f.icons)?.draw(dc, SIDE, band, &text);
                     let t = track(top);
                     let kx = t.left + value.clamp(0.0, 1.0) * (t.right - t.left);
@@ -386,7 +434,8 @@ struct Panel {
     networks: RefCell<Vec<wifi::Network>>,
     volume: RefCell<Option<IAudioEndpointVolume>>,
     hover: Cell<Option<usize>>,
-    dragging: Cell<bool>,
+    /// Slider being dragged (its act), if any.
+    dragging: Cell<Option<Act>>,
     anchor: Cell<(i32, i32)>,
     closed: Cell<Option<(Kind, Instant)>>,
 }
@@ -410,7 +459,7 @@ pub fn init(gfx: Rc<Gfx>) -> Result<()> {
         networks: RefCell::new(Vec::new()),
         volume: RefCell::new(None),
         hover: Cell::new(None),
-        dragging: Cell::new(false),
+        dragging: Cell::new(None),
         anchor: Cell::new((0, 0)),
         closed: Cell::new(None),
     }));
@@ -435,7 +484,7 @@ pub fn toggle(kind: Kind, x: i32, y: i32) {
     p.hover.set(None);
     let now = clock::now();
     p.month.set((now.wYear as i32, now.wMonth as u32));
-    if kind == Kind::Volume {
+    if matches!(kind, Kind::Volume | Kind::Control) {
         *p.volume.borrow_mut() = endpoint();
     }
     p.rebuild();
@@ -465,6 +514,13 @@ impl Panel {
             Kind::Calendar => calendar_rows(),
             Kind::Battery => battery_rows(status::read_battery(), power::remaining(), power::current()),
             Kind::Volume => volume_rows(self.read_volume()),
+            Kind::Control => control_rows(
+                wifi::radio_on(),
+                wifi::bluetooth_on(),
+                theme::system_dark(),
+                crate::brightness::get(),
+                self.read_volume(),
+            ),
             Kind::Wifi => {
                 let on = wifi::radio_on();
                 let scan = if on == Some(false) { wifi::Scan::Networks(Vec::new()) } else { wifi::scan() };
@@ -505,10 +561,28 @@ impl Panel {
         *self.volume.borrow_mut() = None;
     }
 
-    fn set_volume(&self, t: f32) {
-        if let Some(ep) = self.volume.borrow().as_ref() {
-            unsafe { _ = ep.SetMasterVolumeLevelScalar(t, std::ptr::null()) };
+    /// A slider moved to `t` (0..=1).
+    fn set_value(&self, act: Act, t: f32) {
+        match act {
+            Act::Volume => {
+                if let Some(ep) = self.volume.borrow().as_ref() {
+                    unsafe { _ = ep.SetMasterVolumeLevelScalar(t, std::ptr::null()) };
+                }
+            }
+            Act::Brightness => crate::brightness::set((t * 100.0).round() as u8),
+            _ => {}
         }
+    }
+
+    /// Redraws a dragged slider at `t` without re-reading the system
+    /// (brightness is read through WMI, too slow for every mouse move).
+    fn move_slider(&self, act: Act, t: f32) {
+        let mut rows = self.rows.borrow_mut();
+        if let Some(Row::Slider { value, .. }) = rows.iter_mut().find(|r| matches!(r, Row::Slider { act: a, .. } if *a == act)) {
+            *value = t;
+        }
+        drop(rows);
+        self.redraw();
     }
 
     fn act(&self, act: Act) {
@@ -536,6 +610,12 @@ impl Panel {
             Act::Power(mode) => {
                 power::set(mode);
             }
+            Act::BluetoothToggle => {
+                let on = wifi::bluetooth_on().unwrap_or(true);
+                wifi::set_bluetooth(!on);
+            }
+            Act::DarkToggle => theme::set_dark(!theme::system_dark()),
+            Act::Volume | Act::Brightness => {}
             Act::Mute => {
                 if let Some(ep) = self.volume.borrow().as_ref() {
                     unsafe {
@@ -553,13 +633,14 @@ impl Panel {
         let Some((i, part)) = hit(&rows, x, y) else { return };
         match (&rows[i], part) {
             (Row::Header { switch: Some(_), .. }, Part::Switch) => self.act(Act::WifiToggle),
-            (Row::Slider { .. }, Part::SliderIcon) => self.act(Act::Mute),
-            (Row::Slider { .. }, Part::Slider(t)) => {
-                self.dragging.set(true);
+            (Row::Slider { act: Act::Volume, .. }, Part::SliderIcon) => self.act(Act::Mute),
+            (Row::Slider { act, .. }, Part::Slider(t)) => {
+                self.dragging.set(Some(*act));
                 unsafe { SetCapture(self.popup().hwnd) };
-                self.set_volume(t);
-                self.rebuild();
+                self.set_value(*act, t);
+                self.move_slider(*act, t);
             }
+            (Row::Toggle { act, .. }, _) => self.act(*act),
             (Row::Calendar, Part::CalPrev | Part::CalNext) => {
                 let (yy, mm) = self.month.get();
                 self.month.set(calendar::shift(yy, mm, if part == Part::CalNext { 1 } else { -1 }));
@@ -581,14 +662,15 @@ impl Handler for Panel {
         match msg {
             WM_MOUSEMOVE => {
                 let (x, y) = popup::point(lp, self.popup().scale());
-                if self.dragging.get() {
+                if let Some(act) = self.dragging.get() {
                     let (tops, _) = layout(&self.rows.borrow());
-                    // Own statement: the borrow must end before rebuild() replaces the rows.
-                    let slider = self.rows.borrow().iter().position(|r| matches!(r, Row::Slider { .. }));
+                    // Own statement: the borrow must end before the rows change.
+                    let slider = self.rows.borrow().iter().position(|r| matches!(r, Row::Slider { act: a, .. } if *a == act));
                     if let Some(i) = slider {
                         let t = track(tops[i]);
-                        self.set_volume(((x - t.left) / (t.right - t.left)).clamp(0.0, 1.0));
-                        self.rebuild();
+                        let v = ((x - t.left) / (t.right - t.left)).clamp(0.0, 1.0);
+                        self.set_value(act, v);
+                        self.move_slider(act, v);
                     }
                     return Some(LRESULT(0));
                 }
@@ -602,13 +684,14 @@ impl Handler for Panel {
                 self.press(x, y);
             }
             WM_LBUTTONUP => {
-                if self.dragging.replace(false) {
+                if self.dragging.replace(None).is_some() {
                     unsafe { _ = ReleaseCapture() };
+                    self.rebuild(); // icons follow the final value (mute glyph, levels)
                 }
             }
             WM_KEYDOWN if wp.0 as u16 == VK_ESCAPE.0 => self.close(),
             WM_ACTIVATE if (wp.0 & 0xFFFF) as u32 == WA_INACTIVE => {
-                if !self.dragging.get() {
+                if self.dragging.get().is_none() {
                     self.close();
                 }
             }
@@ -624,7 +707,7 @@ mod tests {
 
     #[test]
     fn hits_switch_slider_and_calendar_arrows() {
-        let rows = vec![Row::Header { title: "Wi-Fi".into(), switch: Some(true) }, Row::Slider { icon: 'x', value: 0.5 }, Row::Calendar];
+        let rows = vec![Row::Header { title: "Wi-Fi".into(), switch: Some(true) }, Row::Slider { icon: 'x', value: 0.5, act: Act::Volume }, Row::Calendar];
         let (tops, _) = layout(&rows);
         assert_eq!(hit(&rows, WIDTH - SIDE - 10.0, tops[0] + 10.0), Some((0, Part::Switch)));
         assert_eq!(hit(&rows, 20.0, tops[0] + 10.0), None, "header title is not a control");

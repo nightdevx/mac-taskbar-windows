@@ -2,6 +2,7 @@
 
 mod appbar;
 mod appid;
+mod brightness;
 mod calendar;
 mod clock;
 mod dock;

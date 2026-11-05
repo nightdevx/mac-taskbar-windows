@@ -196,6 +196,7 @@ fn panels_png(path: &str, dwrite: &windows::Win32::Graphics::DirectWrite::IDWrit
         panels::wifi_rows(Some(true), &crate::wifi::Scan::Networks(nets), None),
         panels::battery_rows(Some(status::Battery { percent: 64, plugged: false }), Some(3 * 3600 + 20 * 60), Some(crate::power::Mode::Balanced)),
         panels::volume_rows(Some(status::Volume { level: 0.45, muted: false })),
+        panels::control_rows(Some(true), Some(false), true, Some(70), Some(status::Volume { level: 0.45, muted: false })),
     ];
     let heights: Vec<f32> = sets.iter().map(|r| panels::layout(r).1).collect();
     let tallest = heights.iter().cloned().fold(0.0, f32::max);

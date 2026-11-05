@@ -415,6 +415,7 @@ impl MenuBar {
             Hit::Status(status::Kind::Network) => panels::Kind::Wifi,
             Hit::Status(status::Kind::Battery) => panels::Kind::Battery,
             Hit::Status(status::Kind::Volume) => panels::Kind::Volume,
+            Hit::Status(status::Kind::Control) => panels::Kind::Control,
         };
         panels::toggle(kind, centre, below);
     }
