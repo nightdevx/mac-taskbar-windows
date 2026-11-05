@@ -9,6 +9,7 @@ mod menubar;
 mod snapshot;
 mod status;
 mod theme;
+mod window;
 
 use std::rc::Rc;
 use std::time::Instant;

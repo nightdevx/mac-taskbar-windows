@@ -4,15 +4,11 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
-use windows::UI::Composition::{CompositionColorBrush, CompositionDrawingSurface, SpriteVisual};
-use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
+use windows::UI::Composition::{CompositionDrawingSurface, SpriteVisual};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ABN_POSCHANGED;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
@@ -21,6 +17,7 @@ use windows_numerics::Vector2;
 use crate::gfx::{self, Gfx, Label};
 use crate::theme::{self, Palette};
 use crate::status::{self, Icon, Sources};
+use crate::window::{self, Backdrop, Handler};
 use crate::{appbar, appid, clock, log};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 
@@ -140,9 +137,7 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, st:
 
 struct Comp {
     _target: DesktopWindowTarget,
-    /// Blurred desktop behind the bar; hidden when transparency effects are off.
-    backdrop: SpriteVisual,
-    tint: CompositionColorBrush,
+    backdrop: Backdrop,
     content: SpriteVisual,
     surface: CompositionDrawingSurface,
 }
@@ -166,17 +161,6 @@ pub struct MenuBar {
 
 impl MenuBar {
     pub fn create(gfx: Rc<Gfx>, hidden: bool) -> Result<&'static MenuBar> {
-        let instance = unsafe { GetModuleHandleW(None)? };
-        let wc = WNDCLASSEXW {
-            cbSize: size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(wndproc),
-            hInstance: instance.into(),
-            hCursor: unsafe { LoadCursorW(None, IDC_ARROW)? },
-            lpszClassName: CLASS,
-            ..Default::default()
-        };
-        unsafe { RegisterClassExW(&wc) };
-
         let palette = theme::system_palette();
         let bar: &'static MenuBar = Box::leak(Box::new(MenuBar {
             hwnd: Cell::new(HWND::default()),
@@ -193,22 +177,7 @@ impl MenuBar {
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
         }));
 
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
-                CLASS,
-                w!("Menu bar"),
-                WS_POPUP,
-                0,
-                0,
-                0,
-                0,
-                None,
-                None,
-                Some(instance.into()),
-                Some(bar as *const MenuBar as *const _),
-            )?
-        };
+        let hwnd = window::create(CLASS, bar)?;
         bar.hwnd.set(hwnd);
         BAR_HWND.set(hwnd);
         bar.init_visuals()?;
@@ -238,40 +207,26 @@ impl MenuBar {
         let root = c.CreateContainerVisual()?;
         root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
 
-        let full = Vector2 { X: 1.0, Y: 1.0 };
-        unsafe {
-            let on = windows::core::BOOL(1);
-            DwmSetWindowAttribute(self.hwnd.get(), DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as *const _, 4)?;
-        }
-        let backdrop = c.CreateSpriteVisual()?;
-        backdrop.SetRelativeSizeAdjustment(full)?;
-        backdrop.SetBrush(&c.CreateHostBackdropBrush()?)?;
-
-        let tint = c.CreateColorBrush()?;
-        let tint_visual = c.CreateSpriteVisual()?;
-        tint_visual.SetRelativeSizeAdjustment(full)?;
-        tint_visual.SetBrush(&tint)?;
+        let backdrop = Backdrop::new(c, self.hwnd.get())?;
 
         let surface = self.gfx.surface(1, 1)?;
         let content = c.CreateSpriteVisual()?;
         content.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
 
-        root.Children()?.InsertAtTop(&backdrop)?;
-        root.Children()?.InsertAtTop(&tint_visual)?;
+        root.Children()?.InsertAtTop(&backdrop.blur)?;
+        root.Children()?.InsertAtTop(&backdrop.tint_visual)?;
         root.Children()?.InsertAtTop(&content)?;
         target.SetRoot(&root)?;
-        *self.comp.borrow_mut() = Some(Comp { _target: target, backdrop, tint, content, surface });
+        *self.comp.borrow_mut() = Some(Comp { _target: target, backdrop, content, surface });
         self.apply_background();
         Ok(())
     }
 
-    /// Tint over blur, or the same colour opaque when transparency effects are off.
     fn apply_background(&self) {
-        let Some(c) = self.comp.borrow().as_ref().map(|c| (c.backdrop.clone(), c.tint.clone())) else { return };
-        let blur = theme::transparency();
         let bar = self.state.borrow().palette.bar;
-        _ = c.0.SetIsVisible(blur);
-        _ = c.1.SetColor(if blur { bar } else { bar.opaque() }.ui());
+        if let Some(c) = self.comp.borrow().as_ref() {
+            c.backdrop.apply(bar);
+        }
     }
 
     /// Sizes and positions the bar on the primary monitor; redraws if the size or DPI changed.
@@ -281,14 +236,9 @@ impl MenuBar {
         }
         let hwnd = self.hwnd.get();
         unsafe {
-            let monitor = MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY);
-            let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-            let (mut dpi, mut dpi_y) = (96, 96);
-            _ = GetMonitorInfoW(monitor, &mut mi);
-            _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
-
+            let (monitor, dpi) = window::primary_monitor();
             let h = theme::px(theme::MENUBAR_HEIGHT, dpi);
-            let rc = if self.hidden { appbar::top_rect(mi.rcMonitor, h) } else { appbar::set_top(hwnd, mi.rcMonitor, h) };
+            let rc = if self.hidden { appbar::edge_rect(monitor, appbar::Edge::Top, h) } else { appbar::set_edge(hwnd, appbar::Edge::Top, monitor, h) };
             let size = (rc.right - rc.left, h);
             _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), rc.left, rc.top, size.0, size.1, SWP_NOACTIVATE);
 
@@ -381,7 +331,10 @@ impl MenuBar {
         }
     }
 
-    fn handle(&self, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
+}
+
+impl Handler for MenuBar {
+    fn handle(&self, _: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_TIMER if wp.0 == TIMER_CLOCK => self.refresh_clock(),
             WM_TIMECHANGE => self.refresh_clock(),
@@ -426,21 +379,5 @@ impl MenuBar {
 unsafe extern "system" fn on_foreground(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, _: i32, _: u32, _: u32) {
     if id_object == OBJID_WINDOW.0 && !hwnd.is_invalid() {
         unsafe { _ = PostMessageW(Some(BAR_HWND.get()), WM_FOREGROUND, WPARAM(hwnd.0 as usize), LPARAM(0)) };
-    }
-}
-
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    unsafe {
-        if msg == WM_NCCREATE {
-            let cs = &*(lp.0 as *const CREATESTRUCTW);
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
-        }
-        let bar = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const MenuBar;
-        if let Some(bar) = bar.as_ref()
-            && let Some(r) = bar.handle(msg, wp, lp)
-        {
-            return r;
-        }
-        DefWindowProcW(hwnd, msg, wp, lp)
     }
 }
