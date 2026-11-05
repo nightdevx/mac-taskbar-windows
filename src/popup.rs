@@ -129,7 +129,15 @@ impl Popup {
             Place::Above(bottom) => (bottom - hp).max(monitor.top + 4),
             Place::Below(top) => top.min(monitor.bottom - hp - 4),
         };
-        let grow_from_top = matches!(place, Place::Below(_));
+        let pivot = if matches!(place, Place::Below(_)) { 0 } else { hp };
+        self.show_rect(RECT { left: x, top: y, right: x + wp, bottom: y + hp }, dpi, RADIUS, pivot, draw);
+    }
+
+    /// Shows at exactly `rc` (screen px) with corner `radius` (DIPs); the
+    /// appear animation grows from `pivot_y` px down the window.
+    pub fn show_rect(&self, rc: RECT, dpi: u32, radius: f32, pivot_y: i32, draw: impl Fn(&ID2D1DeviceContext) -> Result<()>) {
+        let s = theme::scale(dpi);
+        let (x, y, wp, hp) = (rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
         let was_visible = self.visible();
         self.scale.set(s);
         self.size.set((wp, hp));
@@ -141,8 +149,8 @@ impl Popup {
                 Y: hp as f32,
             });
             _ = c.shape.SetCornerRadius(Vector2 {
-                X: RADIUS * s,
-                Y: RADIUS * s,
+                X: radius * s,
+                Y: radius * s,
             });
             _ = c.content.SetSize(Vector2 {
                 X: wp as f32,
@@ -152,7 +160,7 @@ impl Popup {
         }
         self.redraw(draw);
         if !was_visible {
-            self.appear(wp, if grow_from_top { 0 } else { hp });
+            self.appear(wp, pivot_y);
             unsafe {
                 _ = ShowWindow(
                     self.hwnd,
@@ -216,6 +224,21 @@ impl Popup {
             && let Err(e) = self.gfx.draw(&c.surface, self.scale.get(), draw)
         {
             crate::log::error(&format!("popup draw: {e}"));
+        }
+    }
+
+    /// Hides and frees the drawing surface (a full-screen one is many MB).
+    pub fn hide_and_release(&self) {
+        self.hide();
+        if let Some(c) = self.comp.borrow().as_ref() {
+            _ = self.gfx.resize(&c.surface, 1, 1);
+        }
+    }
+
+    /// Tint over the blur for this popup (Launchpad is darker than menus).
+    pub fn set_tint(&self, color: theme::Rgba) {
+        if let Some(c) = self.comp.borrow().as_ref() {
+            c.backdrop.apply(color);
         }
     }
 

@@ -121,6 +121,8 @@ impl Geometry {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Kind {
     App,
+    /// "Show applications" button, first in the dock; opens Launchpad.
+    Launchpad,
     /// Pinned folder right of the separator; opens as a stack.
     Folder,
     Trash,
@@ -313,6 +315,7 @@ impl Dock {
                 dock.items.borrow_mut()[i].windows = e.windows;
             }
         }
+        dock.add_launchpad();
         dock.sync_stacks();
         unsafe {
             _ = RegisterShellHookWindow(hwnd);
@@ -343,7 +346,7 @@ impl Dock {
 
     fn geometry(&self) -> Geometry {
         Geometry {
-            sep: self.items.borrow().iter().position(|i| i.kind != Kind::App),
+            sep: self.items.borrow().iter().position(|i| matches!(i.kind, Kind::Folder | Kind::Trash)),
             icon: settings::get().dock_icon,
         }
     }
@@ -873,7 +876,8 @@ impl Dock {
         let mut items = self.items.borrow_mut();
         // Apps stay left of the separator; folders before Trash; Trash last.
         let at = match kind {
-            Kind::App => items.iter().position(|i| i.kind != Kind::App),
+            Kind::Launchpad => Some(0),
+            Kind::App => items.iter().position(|i| matches!(i.kind, Kind::Folder | Kind::Trash)),
             Kind::Folder => items.iter().position(|i| i.kind == Kind::Trash),
             Kind::Trash => None,
         }
@@ -890,9 +894,27 @@ impl Dock {
         Some(at)
     }
 
+    /// The Launchpad button with its own drawn icon (no shell icon to load).
+    fn add_launchpad(&self) {
+        let none = AppIdentity { aumid: None, exe: None };
+        let Some(i) = self.add_kind(Kind::Launchpad, none, Some("Launchpad".into()), "Launchpad".into()) else { return };
+        let px = (settings::DOCK_ICON_MAX * settings::MAGNIFY_MAX * self.scale()).round() as u32;
+        let brush = self.gfx.surface(px, px).and_then(|surface| {
+            self.gfx.draw(&surface, 1.0, |dc| crate::launchpad::draw_button(dc, px as f32))?;
+            self.gfx.compositor.CreateSurfaceBrushWithSurface(&surface)
+        });
+        match brush {
+            Ok(b) => {
+                _ = self.items.borrow()[i].icon.SetBrush(&b);
+                self.brushes.borrow_mut().insert("Launchpad".into(), b);
+            }
+            Err(e) => log::error(&format!("launchpad button: {e}")),
+        }
+    }
+
     /// Folders from the settings, then Trash, right of the separator.
     fn sync_stacks(&self) {
-        while let Some(i) = self.items.borrow().iter().position(|i| i.kind != Kind::App) {
+        while let Some(i) = self.items.borrow().iter().position(|i| matches!(i.kind, Kind::Folder | Kind::Trash)) {
             self.remove_item(i);
         }
         let none = || AppIdentity { aumid: None, exe: None };
@@ -928,6 +950,9 @@ impl Dock {
     /// Uses the cached icon for `source`, or asks the worker for it. Icons are
     /// extracted once at the largest size and magnification, then scaled down.
     fn set_icon(&self, visual: &SpriteVisual, source: &str) {
+        if source == "Launchpad" && !self.brushes.borrow().contains_key(source) {
+            return; // drawn by add_launchpad
+        }
         if let Some(brush) = self.brushes.borrow().get(source) {
             _ = visual.SetBrush(brush);
             return;
@@ -1101,6 +1126,7 @@ impl Dock {
                 unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(TRASH), None, None, SW_SHOWNORMAL) };
                 return;
             }
+            Kind::Launchpad => return crate::launchpad::toggle(),
             Kind::App => {}
         }
         let (windows, launch) = {
@@ -1162,7 +1188,7 @@ impl Dock {
                 let items = self.items.borrow();
                 (items[i].kind, items[i].source.clone())
             };
-            if kind != Kind::App {
+            if matches!(kind, Kind::Folder | Kind::Trash) {
                 return self.stack_menu(i, kind, source);
             }
         }

@@ -102,7 +102,8 @@ pub fn load(source: &str, size: u32) -> Icon {
                         cx: size as i32,
                         cy: size as i32,
                     },
-                    SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
+                    // SCALEUP: stretch small icons instead of framing them in a grey document.
+                    SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK | windows::Win32::UI::Shell::SIIGBF_SCALEUP,
                 )
             })
             .ok()

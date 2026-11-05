@@ -28,6 +28,7 @@ pub fn run(path: &str) -> Result<()> {
     prefs_png(&path.replace(".png", "-prefs.png"), &dwrite)?;
     menu_png(&path.replace(".png", "-menu.png"), &dwrite)?;
     panels_png(&path.replace(".png", "-panels.png"), &dwrite)?;
+    launchpad_png(&path.replace(".png", "-launchpad.png"), &dwrite)?;
     let fonts = Fonts::new(&dwrite)?;
     let bar_h = theme::MENUBAR_HEIGHT;
     let gap = 12.0;
@@ -225,6 +226,29 @@ fn panels_png(path: &str, dwrite: &windows::Win32::Graphics::DirectWrite::IDWrit
             }
         }
         Ok(())
+    })
+}
+
+/// Launchpad's first page with the installed apps, over a flat wallpaper.
+fn launchpad_png(path: &str, dwrite: &windows::Win32::Graphics::DirectWrite::IDWriteFactory) -> Result<()> {
+    use crate::launchpad;
+    let fonts = launchpad::Fonts::new(dwrite)?;
+    let (w, h) = (1280.0, 800.0);
+    let apps = launchpad::apps();
+    let page: Vec<launchpad::App> = apps.into_iter().take(launchpad::PER_PAGE).collect();
+    let px = (launchpad::grid(w, h).icon * SCALE).round() as u32;
+    let icons = page
+        .iter()
+        .map(|a| {
+            let src = a.icon_source();
+            (src.clone(), icons::load(&src, px))
+        })
+        .collect();
+    let view = launchpad::View { size: (w, h), query: "", apps: &page, icons: &icons, loading: false, page: 0, pages: 3, hover: Some(8), scale: SCALE };
+    render_png(path, w, h, |dc| unsafe {
+        let wall = dc.CreateSolidColorBrush(&Rgba(52, 60, 78, 255).d2d(), None)?;
+        dc.FillRectangle(&D2D_RECT_F { left: 0.0, top: 0.0, right: w, bottom: h }, &wall);
+        launchpad::draw(dc, dwrite, &fonts, &view)
     })
 }
 

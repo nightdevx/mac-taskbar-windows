@@ -7,6 +7,7 @@ mod clock;
 mod dock;
 mod gfx;
 mod icons;
+mod launchpad;
 mod log;
 mod magnify;
 mod menu;
@@ -96,6 +97,7 @@ fn run(hidden: bool, open_settings: bool) -> Result<()> {
     menu::init(gfx.clone())?;
     panels::init(gfx.clone())?;
     stack::init(gfx.clone())?;
+    launchpad::init(gfx.clone())?;
     preview::init(
         gfx,
         unsafe { FindWindowW(dock::CLASS, None) }.unwrap_or_default(),
