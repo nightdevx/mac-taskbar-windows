@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{CompositionColorBrush, CompositionDrawingSurface, SpriteVisual};
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
@@ -125,7 +126,9 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, st:
 
 struct Comp {
     _target: DesktopWindowTarget,
-    bg: CompositionColorBrush,
+    /// Blurred desktop behind the bar; hidden when transparency effects are off.
+    backdrop: SpriteVisual,
+    tint: CompositionColorBrush,
     content: SpriteVisual,
     surface: CompositionDrawingSurface,
 }
@@ -221,20 +224,40 @@ impl MenuBar {
         let root = c.CreateContainerVisual()?;
         root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
 
-        let bg = c.CreateColorBrushWithColor(self.state.borrow().palette.bar.ui())?;
-        let bg_visual = c.CreateSpriteVisual()?;
-        bg_visual.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
-        bg_visual.SetBrush(&bg)?;
+        let full = Vector2 { X: 1.0, Y: 1.0 };
+        unsafe {
+            let on = windows::core::BOOL(1);
+            DwmSetWindowAttribute(self.hwnd.get(), DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as *const _, 4)?;
+        }
+        let backdrop = c.CreateSpriteVisual()?;
+        backdrop.SetRelativeSizeAdjustment(full)?;
+        backdrop.SetBrush(&c.CreateHostBackdropBrush()?)?;
+
+        let tint = c.CreateColorBrush()?;
+        let tint_visual = c.CreateSpriteVisual()?;
+        tint_visual.SetRelativeSizeAdjustment(full)?;
+        tint_visual.SetBrush(&tint)?;
 
         let surface = self.gfx.surface(1, 1)?;
         let content = c.CreateSpriteVisual()?;
         content.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
 
-        root.Children()?.InsertAtTop(&bg_visual)?;
+        root.Children()?.InsertAtTop(&backdrop)?;
+        root.Children()?.InsertAtTop(&tint_visual)?;
         root.Children()?.InsertAtTop(&content)?;
         target.SetRoot(&root)?;
-        *self.comp.borrow_mut() = Some(Comp { _target: target, bg, content, surface });
+        *self.comp.borrow_mut() = Some(Comp { _target: target, backdrop, tint, content, surface });
+        self.apply_background();
         Ok(())
+    }
+
+    /// Tint over blur, or the same colour opaque when transparency effects are off.
+    fn apply_background(&self) {
+        let Some(c) = self.comp.borrow().as_ref().map(|c| (c.backdrop.clone(), c.tint.clone())) else { return };
+        let blur = theme::transparency();
+        let bar = self.state.borrow().palette.bar;
+        _ = c.0.SetIsVisible(blur);
+        _ = c.1.SetColor(if blur { bar } else { bar.opaque() }.ui());
     }
 
     /// Sizes and positions the bar on the primary monitor; redraws if the size or DPI changed.
@@ -333,16 +356,15 @@ impl MenuBar {
         self.redraw();
     }
 
+    /// Theme or transparency setting changed (both arrive as "ImmersiveColorSet").
     fn refresh_palette(&self) {
         let palette = theme::system_palette();
-        if self.state.borrow().palette == palette {
-            return;
-        }
+        let changed = self.state.borrow().palette != palette;
         self.state.borrow_mut().palette = palette;
-        if let Some(c) = self.comp.borrow().as_ref() {
-            _ = c.bg.SetColor(palette.bar.ui());
+        self.apply_background();
+        if changed {
+            self.redraw();
         }
-        self.redraw();
     }
 
     fn handle(&self, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {

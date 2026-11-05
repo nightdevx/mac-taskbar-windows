@@ -2,7 +2,7 @@
 
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 pub const MENUBAR_HEIGHT: f32 = 28.0;
 pub const MENUBAR_PAD_X: f32 = 14.0;
@@ -35,6 +35,10 @@ impl Rgba {
     pub fn ui(self) -> windows::UI::Color {
         windows::UI::Color { R: self.0, G: self.1, B: self.2, A: self.3 }
     }
+
+    pub fn opaque(self) -> Self {
+        Rgba(self.0, self.1, self.2, 255)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -49,23 +53,32 @@ pub struct Palette {
 pub const DARK: Palette = Palette { bar: Rgba(28, 28, 30, 150), text: Rgba(255, 255, 255, 235), alert: Rgba(255, 153, 164, 255) };
 pub const LIGHT: Palette = Palette { bar: Rgba(246, 246, 248, 165), text: Rgba(0, 0, 0, 220), alert: Rgba(196, 43, 28, 255) };
 
-/// System surfaces (taskbar, Start) follow `SystemUsesLightTheme`, not the app setting.
-pub fn system_palette() -> Palette {
+fn personalize_flag(name: PCWSTR) -> Option<bool> {
     let mut value = 0u32;
     let mut size = 4u32;
-    let light = unsafe {
+    unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
-            w!("SystemUsesLightTheme"),
+            name,
             RRF_RT_REG_DWORD,
             None,
             Some(&mut value as *mut u32 as *mut _),
             Some(&mut size),
         )
         .is_ok()
-    } && value == 1;
-    if light { LIGHT } else { DARK }
+        .then_some(value != 0)
+    }
+}
+
+/// System surfaces (taskbar, Start) follow `SystemUsesLightTheme`, not the app setting.
+pub fn system_palette() -> Palette {
+    if personalize_flag(w!("SystemUsesLightTheme")) == Some(true) { LIGHT } else { DARK }
+}
+
+/// Settings > Personalisation > Colours > Transparency effects. Missing value means on.
+pub fn transparency() -> bool {
+    personalize_flag(w!("EnableTransparency")) != Some(false)
 }
 
 pub fn scale(dpi: u32) -> f32 {
