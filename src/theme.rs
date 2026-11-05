@@ -22,8 +22,6 @@ pub const NAME_MIN_WIDTH: f32 = 120.0;
 /// Space between the dock and the screen edge.
 pub const DOCK_MARGIN: f32 = 6.0;
 pub const DOCK_DOT: f32 = 4.0;
-/// Largest magnification (F3); icons are extracted at this size.
-pub const DOCK_MAGNIFY: f32 = 1.6;
 pub const TEXT_FONT: &str = "Segoe UI Variable Text";
 pub const TEXT_SIZE: f32 = 13.0;
 pub const ICON_FONT: &str = "Segoe Fluent Icons";

@@ -9,7 +9,8 @@ use std::rc::Rc;
 use windows::Foundation::TimeSpan;
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
-    CompositionDrawingSurface, CompositionRoundedRectangleGeometry, CompositionSurfaceBrush, ContainerVisual, SpriteVisual,
+    CompositionDrawingSurface, CompositionRoundedRectangleGeometry, CompositionSurfaceBrush, Compositor, ContainerVisual,
+    ImplicitAnimationCollection, SpriteVisual,
 };
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT};
@@ -30,7 +31,7 @@ use crate::settings::{self, Settings};
 use crate::theme::{self, Palette};
 use crate::window::{self, Backdrop, Handler};
 use crate::winlist::{self, ShellEvent};
-use crate::{appbar, log};
+use crate::{appbar, log, magnify};
 
 pub const CLASS: PCWSTR = w!("TaskbarDock");
 const WM_APPBAR: u32 = WM_APP + 1;
@@ -43,6 +44,10 @@ pub const WM_OPEN_SETTINGS: u32 = WM_APP + 6;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_HIDE: usize = 1;
 const TIMER_REGION: usize = 2;
+/// After magnified icons settle back, shrink the window region to the dock.
+const TIMER_REST: usize = 3;
+/// Icons follow the pointer through a short animation, which also smooths the return.
+const FOLLOW_MS: u32 = 120;
 /// Pointer away this long before an auto-hiding dock slides out.
 const HIDE_DELAY_MS: u32 = 500;
 const SLIDE_MS: u32 = 250;
@@ -84,15 +89,6 @@ impl Geometry {
     }
     pub fn item_x(self, i: usize) -> f32 {
         self.pad() + i as f32 * (self.icon + self.gap())
-    }
-    /// Item under `x`; each gap is split between its two neighbours.
-    pub fn hit(self, n: usize, x: f32) -> Option<usize> {
-        let pos = x - self.pad() + self.gap() / 2.0;
-        if pos < 0.0 {
-            return None;
-        }
-        let i = (pos / (self.icon + self.gap())) as usize;
-        (i < n).then_some(i)
     }
 }
 
@@ -165,7 +161,11 @@ struct Comp {
     _target: DesktopWindowTarget,
     /// Everything that slides when the dock hides.
     slide: ContainerVisual,
+    /// Blurred background; widens with magnification.
+    frame: ContainerVisual,
     backdrop: Backdrop,
+    /// Implicit Offset/Scale/Size animations shared by icons, dots and the frame.
+    follow: ImplicitAnimationCollection,
     shape: CompositionRoundedRectangleGeometry,
     items: ContainerVisual,
     dot_surface: CompositionDrawingSurface,
@@ -184,6 +184,8 @@ pub struct Dock {
     palette: Cell<Palette>,
     /// Auto-hide: whether the dock is currently out.
     shown: Cell<bool>,
+    /// Pointer x over the dock (DIPs from the resting dock's left edge) while magnifying.
+    pointer: Cell<Option<f32>>,
     tracking: Cell<bool>,
     registered: Cell<bool>,
     items: RefCell<Vec<Item>>,
@@ -207,6 +209,7 @@ impl Dock {
             size: Cell::new((0, 0)),
             palette: Cell::new(theme::system_palette()),
             shown: Cell::new(true),
+            pointer: Cell::new(None),
             tracking: Cell::new(false),
             registered: Cell::new(false),
             items: RefCell::new(Vec::new()),
@@ -277,11 +280,13 @@ impl Dock {
         implicit.Insert(&HSTRING::from("Offset"), &anim)?;
         slide.SetImplicitAnimations(&implicit)?;
 
-        // Rounded frame clips the blur and tint; icons sit above it unclipped (room for effects).
+        let follow = follow_animations(c)?;
+        // Rounded frame clips the blur and tint; icons sit above it unclipped (they grow out of it).
         let frame = c.CreateContainerVisual()?;
         let shape = c.CreateRoundedRectangleGeometry()?;
         frame.SetClip(&c.CreateGeometricClipWithGeometry(&shape)?)?;
-        frame.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })?;
+        frame.SetImplicitAnimations(&follow)?;
+        shape.SetImplicitAnimations(&follow)?;
         let backdrop = Backdrop::new(c, self.hwnd.get())?;
         frame.Children()?.InsertAtTop(&backdrop.blur)?;
         frame.Children()?.InsertAtTop(&backdrop.tint_visual)?;
@@ -295,7 +300,7 @@ impl Dock {
         root.Children()?.InsertAtTop(&slide)?;
         target.SetRoot(&root)?;
         backdrop.apply(self.palette.get().bar);
-        *self.comp.borrow_mut() = Some(Comp { _target: target, slide, backdrop, shape, items, dot_surface, dot_brush });
+        *self.comp.borrow_mut() = Some(Comp { _target: target, slide, frame, backdrop, follow, shape, items, dot_surface, dot_brush });
         Ok(())
     }
 
@@ -314,8 +319,16 @@ impl Dock {
         self.registered.set(want);
     }
 
+    /// Screen strip the resting dock needs (what the AppBar reserves).
     fn thickness_px(&self) -> i32 {
         theme::px(self.geometry().height() + theme::DOCK_MARGIN, self.dpi.get())
+    }
+
+    /// Room around the resting dock for magnified icons (DIPs): (each side, above).
+    fn headroom(&self) -> (f32, f32) {
+        let g = self.geometry();
+        let grow = g.icon * (settings::get().dock_magnify - 1.0);
+        (grow * (magnify::RADIUS + 0.5), grow)
     }
 
     /// Picks the bottom strip (on start, size, DPI or display change) and repositions.
@@ -343,35 +356,76 @@ impl Dock {
     fn relayout(&self) {
         let s = self.scale();
         let g = self.geometry();
-        let items = self.items.borrow();
-        let w = (g.width(items.len()) * s).round() as i32;
-        let h = self.thickness_px();
+        let n = self.items.borrow().len();
+        let (side, above) = self.headroom();
+        let w = ((g.width(n) + 2.0 * side) * s).round() as i32;
+        let h = self.thickness_px() + (above * s).round() as i32;
         let strip = self.strip.get();
         let x = (strip.left + strip.right) / 2 - w / 2;
         unsafe { _ = SetWindowPos(self.hwnd.get(), Some(HWND_TOPMOST), x, strip.bottom - h, w, h, SWP_NOACTIVATE) };
         self.size.set((w, h));
+        if let Some(c) = self.comp.borrow().as_ref() {
+            _ = c.items.SetOffset(Vector3 { X: (side * s).round(), Y: (above * s).round(), Z: 0.0 });
+            _ = c.shape.SetCornerRadius(Vector2 { X: g.radius() * s, Y: g.radius() * s });
+        }
+        self.position_items();
+        self.update_region();
+    }
 
+    /// Moves icons, dots and the background to the current magnification.
+    /// Only composition properties change; DWM animates them.
+    fn position_items(&self) {
+        let s = self.scale();
+        let g = self.geometry();
+        let items = self.items.borrow();
+        let l = magnify::layout(g, items.len(), self.pointer.get(), settings::get().dock_magnify);
         let comp = self.comp.borrow();
         let Some(c) = comp.as_ref() else { return };
-        _ = c.shape.SetSize(Vector2 { X: w as f32, Y: (g.height() * s).round() });
-        _ = c.shape.SetCornerRadius(Vector2 { X: g.radius() * s, Y: g.radius() * s });
+        let (side, above) = self.headroom();
+        let frame = Vector2 { X: ((l.right - l.left) * s).round(), Y: (g.height() * s).round() };
+        _ = c.frame.SetOffset(Vector3 { X: ((side + l.left) * s).round(), Y: (above * s).round(), Z: 0.0 });
+        _ = c.frame.SetSize(frame);
+        _ = c.shape.SetSize(frame);
         let icon = (g.icon * s).round();
         let dot = theme::DOCK_DOT * s;
+        let dot_y = ((g.pad() + g.icon + (g.pad_bottom() - theme::DOCK_DOT) / 2.0) * s).round();
         let indicators = settings::get().dock_indicators;
-        for (i, item) in items.iter().enumerate() {
-            let left = (g.item_x(i) * s).round();
-            _ = item.icon.SetOffset(Vector3 { X: left, Y: (g.pad() * s).round(), Z: 0.0 });
+        for (item, (left, k)) in items.iter().zip(&l.items) {
+            let centre = (left + g.icon * k / 2.0) * s;
+            // Scale grows up from the bottom centre, like the macOS dock.
             _ = item.icon.SetSize(Vector2 { X: icon, Y: icon });
-            let dot_y = (g.pad() + g.icon + (g.pad_bottom() - theme::DOCK_DOT) / 2.0) * s;
-            _ = item.dot.SetOffset(Vector3 { X: (left + (icon - dot) / 2.0).round(), Y: dot_y.round(), Z: 0.0 });
+            _ = item.icon.SetCenterPoint(Vector3 { X: icon / 2.0, Y: icon, Z: 0.0 });
+            _ = item.icon.SetScale(Vector3 { X: *k, Y: *k, Z: 1.0 });
+            _ = item.icon.SetOffset(Vector3 { X: centre - icon / 2.0, Y: (g.pad() * s).round(), Z: 0.0 });
             _ = item.dot.SetSize(Vector2 { X: dot, Y: dot });
+            _ = item.dot.SetOffset(Vector3 { X: (centre - dot / 2.0).round(), Y: dot_y, Z: 0.0 });
             _ = item.dot.SetIsVisible(indicators && !item.windows.is_empty());
         }
-        drop(comp);
-        drop(items);
-        if !self.shown.get() {
-            self.set_trigger_region();
+    }
+
+    /// Window region: the trigger strip when hidden, the whole window while
+    /// magnifying (icons grow above the dock), otherwise just the resting dock,
+    /// so clicks beside and above it reach the apps underneath.
+    fn update_region(&self) {
+        let (w, h) = self.size.get();
+        let s = self.scale();
+        let (side, _) = self.headroom();
+        let left = (side * s).round() as i32;
+        let right = w - left;
+        unsafe {
+            if !self.shown.get() {
+                SetWindowRgn(self.hwnd.get(), Some(CreateRectRgn(left, h - TRIGGER_PX, right, h)), true);
+            } else if self.pointer.get().is_some() {
+                SetWindowRgn(self.hwnd.get(), None, true);
+            } else {
+                SetWindowRgn(self.hwnd.get(), Some(CreateRectRgn(left, h - self.thickness_px(), right, h)), true);
+            }
         }
+    }
+
+    /// Pointer x in DIPs from the resting dock's left edge.
+    fn dock_x(&self, x_px: i32) -> f32 {
+        x_px as f32 / self.scale() - self.headroom().0
     }
 
     // ---- auto-hide ----
@@ -386,25 +440,20 @@ impl Dock {
     fn slide_out(&self) {
         self.shown.set(false);
         self.slide_to(true);
+        self.pointer.set(None);
+        self.position_items();
         // Clip the window to the trigger strip once the slide has finished, so apps get the clicks.
         unsafe { SetTimer(Some(self.hwnd.get()), TIMER_REGION, SLIDE_MS + 30, None) };
     }
 
     fn slide_in(&self) {
-        unsafe {
-            _ = KillTimer(Some(self.hwnd.get()), TIMER_REGION);
-            SetWindowRgn(self.hwnd.get(), None, true);
-        }
+        unsafe { _ = KillTimer(Some(self.hwnd.get()), TIMER_REGION) };
         self.shown.set(true);
+        self.update_region();
         self.slide_to(false);
     }
 
-    fn set_trigger_region(&self) {
-        let (w, h) = self.size.get();
-        unsafe { SetWindowRgn(self.hwnd.get(), Some(CreateRectRgn(0, h - TRIGGER_PX, w, h)), true) };
-    }
-
-    fn on_mouse_move(&self) {
+    fn on_mouse_move(&self, x_px: i32) {
         if !self.tracking.replace(true) {
             let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: self.hwnd.get(), dwHoverTime: 0 };
             unsafe { _ = TrackMouseEvent(&mut t) };
@@ -412,11 +461,37 @@ impl Dock {
         unsafe { _ = KillTimer(Some(self.hwnd.get()), TIMER_HIDE) };
         if self.autohide() && !self.shown.get() {
             self.slide_in();
+            return;
+        }
+        if settings::get().dock_magnify <= 1.0 {
+            return;
+        }
+        // Magnify while the pointer is over the dock's current extent.
+        let x = self.dock_x(x_px);
+        let g = self.geometry();
+        let l = magnify::layout(g, self.items.borrow().len(), self.pointer.get(), settings::get().dock_magnify);
+        if x < l.left || x >= l.right {
+            return self.rest();
+        }
+        let first = self.pointer.replace(Some(x)).is_none();
+        unsafe { _ = KillTimer(Some(self.hwnd.get()), TIMER_REST) };
+        if first {
+            self.update_region();
+        }
+        self.position_items();
+    }
+
+    /// Back to resting size; the region shrinks once the icons have settled.
+    fn rest(&self) {
+        if self.pointer.take().is_some() {
+            self.position_items();
+            unsafe { SetTimer(Some(self.hwnd.get()), TIMER_REST, FOLLOW_MS + 60, None) };
         }
     }
 
     fn on_mouse_leave(&self) {
         self.tracking.set(false);
+        self.rest();
         if self.autohide() && self.shown.get() {
             unsafe { SetTimer(Some(self.hwnd.get()), TIMER_HIDE, HIDE_DELAY_MS, None) };
         }
@@ -450,6 +525,8 @@ impl Dock {
         let compositor = &self.gfx.compositor;
         let icon = compositor.CreateSpriteVisual().ok()?;
         let dot = compositor.CreateSpriteVisual().ok()?;
+        _ = icon.SetImplicitAnimations(&c.follow);
+        _ = dot.SetImplicitAnimations(&c.follow);
         _ = dot.SetBrush(&c.dot_brush);
         _ = c.items.Children().and_then(|ch| ch.InsertAtTop(&icon));
         _ = c.items.Children().and_then(|ch| ch.InsertAtTop(&dot));
@@ -478,7 +555,7 @@ impl Dock {
         if self.requested.borrow_mut().insert(source.to_string())
             && let Some(loader) = self.loader.borrow().as_ref()
         {
-            loader.request(source, (settings::DOCK_ICON_MAX * theme::DOCK_MAGNIFY * self.scale()).round() as u32);
+            loader.request(source, (settings::DOCK_ICON_MAX * settings::MAGNIFY_MAX * self.scale()).round() as u32);
         }
     }
 
@@ -566,7 +643,9 @@ impl Dock {
     }
 
     fn item_at(&self, x_px: i32) -> Option<usize> {
-        self.geometry().hit(self.items.borrow().len(), x_px as f32 / self.scale())
+        let g = self.geometry();
+        let l = magnify::layout(g, self.items.borrow().len(), self.pointer.get(), settings::get().dock_magnify);
+        magnify::hit(g, &l, self.dock_x(x_px))
     }
 
     /// macOS click: start the app, bring its window forward, minimise it when it
@@ -684,7 +763,8 @@ impl Dock {
 
     /// Follows a settings change (from the menu or the settings window).
     pub fn apply(&self, before: &Settings, after: &Settings) {
-        let layout = (after.dock_icon, after.dock_autohide, after.dock_indicators) != (before.dock_icon, before.dock_autohide, before.dock_indicators);
+        let layout = (after.dock_icon, after.dock_autohide, after.dock_indicators, after.dock_magnify)
+            != (before.dock_icon, before.dock_autohide, before.dock_indicators, before.dock_magnify);
         if !layout {
             return;
         }
@@ -719,7 +799,7 @@ impl Handler for Dock {
             m if m == self.shellhook && m != 0 => self.on_shell(winlist::decode(wp.0, lp.0)),
             WM_ICON => self.on_icon(unsafe { icons::take(lp) }),
             WM_RECHECK => self.recheck(HWND(wp.0 as *mut _)),
-            WM_MOUSEMOVE => self.on_mouse_move(),
+            WM_MOUSEMOVE => self.on_mouse_move(x()),
             WM_MOUSELEAVE => self.on_mouse_leave(),
             WM_TIMER if wp.0 == TIMER_HIDE => unsafe {
                 _ = KillTimer(Some(hwnd), TIMER_HIDE);
@@ -727,12 +807,10 @@ impl Handler for Dock {
                     self.slide_out();
                 }
             },
-            WM_TIMER if wp.0 == TIMER_REGION => unsafe {
-                _ = KillTimer(Some(hwnd), TIMER_REGION);
-                if !self.shown.get() {
-                    self.set_trigger_region();
-                }
-            },
+            WM_TIMER if wp.0 == TIMER_REGION || wp.0 == TIMER_REST => {
+                unsafe { _ = KillTimer(Some(hwnd), wp.0) };
+                self.update_region();
+            }
             WM_LBUTTONUP => self.click(x(), false),
             WM_MBUTTONUP => self.click(x(), true),
             WM_RBUTTONUP => self.context_menu(x()),
@@ -767,6 +845,27 @@ impl Handler for Dock {
     }
 }
 
+/// Short ease-out on Offset, Scale and Size: icons follow the pointer smoothly
+/// and settle back when it leaves.
+fn follow_animations(c: &Compositor) -> Result<ImplicitAnimationCollection> {
+    let ease = c.CreateCubicBezierEasingFunction(Vector2 { X: 0.2, Y: 0.0 }, Vector2 { X: 0.0, Y: 1.0 })?;
+    let set = c.CreateImplicitAnimationCollection()?;
+    let duration = TimeSpan { Duration: FOLLOW_MS as i64 * 10_000 };
+    for prop in ["Offset", "Scale"] {
+        let a = c.CreateVector3KeyFrameAnimation()?;
+        a.SetTarget(&HSTRING::from(prop))?;
+        a.InsertExpressionKeyFrameWithEasingFunction(1.0, &HSTRING::from("this.FinalValue"), &ease)?;
+        a.SetDuration(duration)?;
+        set.Insert(&HSTRING::from(prop), &a)?;
+    }
+    let size = c.CreateVector2KeyFrameAnimation()?;
+    size.SetTarget(&HSTRING::from("Size"))?;
+    size.InsertExpressionKeyFrameWithEasingFunction(1.0, &HSTRING::from("this.FinalValue"), &ease)?;
+    size.SetDuration(duration)?;
+    set.Insert(&HSTRING::from("Size"), &size)?;
+    Ok(set)
+}
+
 unsafe extern "system" fn on_cloak(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, _: i32, _: u32, _: u32) {
     if id_object == OBJID_WINDOW.0 && !hwnd.is_invalid() {
         unsafe { _ = PostMessageW(Some(DOCK_HWND.get()), WM_RECHECK, WPARAM(hwnd.0 as usize), LPARAM(0)) };
@@ -793,16 +892,6 @@ mod tests {
         assert_eq!(G.width(1), 2.0 * G.pad() + G.icon);
         assert_eq!(G.width(3) - G.width(2), G.icon + G.gap());
         assert_eq!(G.width(0), G.width(1), "an empty dock keeps one slot");
-    }
-
-    #[test]
-    fn hit_splits_gaps_between_neighbours() {
-        assert_eq!(G.hit(3, G.item_x(0) + 1.0), Some(0));
-        assert_eq!(G.hit(3, G.item_x(1) - G.gap() / 2.0 + 0.1), Some(1));
-        assert_eq!(G.hit(3, G.item_x(1) - G.gap() / 2.0 - 0.1), Some(0));
-        assert_eq!(G.hit(3, G.item_x(2) + G.icon), Some(2));
-        assert_eq!(G.hit(3, G.width(3) + 5.0), None);
-        assert_eq!(G.hit(3, -1.0), None);
     }
 
     #[test]

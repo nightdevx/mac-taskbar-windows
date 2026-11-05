@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 pub const DOCK_ICON_MIN: f32 = 32.0;
 pub const DOCK_ICON_MAX: f32 = 64.0;
+/// Magnification is a scale: 1.0 is off.
+pub const MAGNIFY_MAX: f32 = 2.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -15,6 +17,8 @@ pub struct Settings {
     pub dock_autohide: bool,
     /// Dot under running apps.
     pub dock_indicators: bool,
+    /// Largest icon scale under the pointer; 1.0 turns magnification off.
+    pub dock_magnify: f32,
     /// Pinned apps as icon/launch sources (.lnk, exe path, `shell:AppsFolder\<AUMID>`).
     /// `None` until the user changes pins: then the Windows taskbar's pins are used.
     pub pins: Option<Vec<String>>,
@@ -23,7 +27,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { dock_icon: 48.0, dock_autohide: false, dock_indicators: true, pins: None, battery_percent: true }
+        Settings { dock_icon: 48.0, dock_autohide: false, dock_indicators: true, dock_magnify: 1.5, pins: None, battery_percent: true }
     }
 }
 
@@ -48,6 +52,11 @@ pub fn parse(text: &str) -> Settings {
                 }
             }
             "dock_autohide" => s.dock_autohide = flag(value, s.dock_autohide),
+            "dock_magnify" => {
+                if let Ok(v) = value.parse::<f32>() {
+                    s.dock_magnify = ((v * 20.0).round() / 20.0).clamp(1.0, MAGNIFY_MAX);
+                }
+            }
             "dock_indicators" => s.dock_indicators = flag(value, s.dock_indicators),
             "battery_percent" => s.battery_percent = flag(value, s.battery_percent),
             "pins" if value.is_empty() => s.pins = Some(Vec::new()),
@@ -60,8 +69,8 @@ pub fn parse(text: &str) -> Settings {
 
 pub fn format(s: &Settings) -> String {
     let mut out = format!(
-        "dock_icon = {}\ndock_autohide = {}\ndock_indicators = {}\nbattery_percent = {}\n",
-        s.dock_icon, s.dock_autohide, s.dock_indicators, s.battery_percent
+        "dock_icon = {}\ndock_autohide = {}\ndock_indicators = {}\ndock_magnify = {}\nbattery_percent = {}\n",
+        s.dock_icon, s.dock_autohide, s.dock_indicators, s.dock_magnify, s.battery_percent
     );
     match &s.pins {
         Some(pins) if pins.is_empty() => out.push_str("pins =\n"),
@@ -125,6 +134,7 @@ mod tests {
             dock_icon: 56.0,
             dock_autohide: true,
             dock_indicators: false,
+            dock_magnify: 1.75,
             pins: Some(vec![r"C:\a\b.lnk".into(), r"shell:AppsFolder\X!App".into()]),
             battery_percent: false,
         };
@@ -141,6 +151,8 @@ mod tests {
         assert!(!s.dock_autohide);
         assert!(s.battery_percent, "bad value keeps the default");
         assert_eq!(parse("dock_icon = 41.6").dock_icon, 42.0, "whole DIPs");
+        assert_eq!(parse("dock_magnify = 9").dock_magnify, MAGNIFY_MAX);
+        assert_eq!(parse("dock_magnify = 0.2").dock_magnify, 1.0, "below 1.0 means off");
         assert_eq!(parse(""), Settings::default());
     }
 

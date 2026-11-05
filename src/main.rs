@@ -7,6 +7,7 @@ mod dock;
 mod gfx;
 mod icons;
 mod log;
+mod magnify;
 mod menubar;
 mod prefs;
 mod settings;

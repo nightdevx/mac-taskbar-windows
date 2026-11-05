@@ -19,7 +19,7 @@ use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
 use crate::gfx::{self, Gfx, Label};
-use crate::settings::{self, DOCK_ICON_MAX, DOCK_ICON_MIN, Settings};
+use crate::settings::{self, DOCK_ICON_MAX, DOCK_ICON_MIN, MAGNIFY_MAX, Settings};
 use crate::theme::{self, Rgba};
 use crate::window::{self, Handler};
 use crate::log;
@@ -49,19 +49,21 @@ const LIGHT_X: [f32; 3] = [20.0, 40.0, 60.0];
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Control {
     Size,
+    Magnify,
     AutoHide,
     Indicators,
     BatteryPercent,
 }
 
 /// Keyboard focus order, also the order rows are laid out in.
-pub const CONTROLS: [Control; 4] = [Control::Size, Control::AutoHide, Control::Indicators, Control::BatteryPercent];
+pub const CONTROLS: [Control; 5] = [Control::Size, Control::Magnify, Control::AutoHide, Control::Indicators, Control::BatteryPercent];
 const GROUPS: [&str; 2] = ["Dock", "Menü çubuğu"];
 
 impl Control {
     fn label(self) -> &'static str {
         match self {
             Control::Size => "Boyut",
+            Control::Magnify => "Büyütme",
             Control::AutoHide => "Dock'u otomatik olarak gizle ve göster",
             Control::Indicators => "Açık uygulamalar için göstergeleri göster",
             Control::BatteryPercent => "Pil yüzdesini göster",
@@ -73,9 +75,27 @@ impl Control {
             _ => 0,
         }
     }
+    fn is_slider(self) -> bool {
+        matches!(self, Control::Size | Control::Magnify)
+    }
+    /// Slider range, step and end labels.
+    fn range(self) -> (f32, f32, f32, &'static str, &'static str) {
+        match self {
+            Control::Magnify => (1.0, MAGNIFY_MAX, 0.05, "Kapalı", "Büyük"),
+            _ => (DOCK_ICON_MIN, DOCK_ICON_MAX, 1.0, "Küçük", "Büyük"),
+        }
+    }
+    fn value(self, s: &Settings) -> f32 {
+        if self == Control::Magnify { s.dock_magnify } else { s.dock_icon }
+    }
+    fn set_value(self, s: &mut Settings, v: f32) {
+        let (min, max, ..) = self.range();
+        let v = v.clamp(min, max);
+        if self == Control::Magnify { s.dock_magnify = v } else { s.dock_icon = v }
+    }
     fn is_on(self, s: &Settings) -> bool {
         match self {
-            Control::Size => false,
+            Control::Size | Control::Magnify => false,
             Control::AutoHide => s.dock_autohide,
             Control::Indicators => s.dock_indicators,
             Control::BatteryPercent => s.battery_percent,
@@ -83,7 +103,7 @@ impl Control {
     }
     fn toggle(self, s: &mut Settings) {
         match self {
-            Control::Size => {}
+            Control::Size | Control::Magnify => {}
             Control::AutoHide => s.dock_autohide ^= true,
             Control::Indicators => s.dock_indicators ^= true,
             Control::BatteryPercent => s.battery_percent ^= true,
@@ -132,14 +152,16 @@ fn track_rect(row: &D2D_RECT_F) -> D2D_RECT_F {
     rect(right - TRACK_W, mid - 2.0, right, mid + 2.0)
 }
 
-/// Icon size for a pointer at `x` on the track, in whole DIPs.
-pub fn slider_value(track: &D2D_RECT_F, x: f32) -> f32 {
+/// Slider value for a pointer at `x` on the track, rounded to the control's step.
+pub fn slider_value(c: Control, track: &D2D_RECT_F, x: f32) -> f32 {
+    let (min, max, step, ..) = c.range();
     let t = ((x - track.left) / (track.right - track.left)).clamp(0.0, 1.0);
-    (DOCK_ICON_MIN + t * (DOCK_ICON_MAX - DOCK_ICON_MIN)).round()
+    ((min + t * (max - min)) / step).round() * step
 }
 
-fn slider_x(track: &D2D_RECT_F, value: f32) -> f32 {
-    track.left + (value - DOCK_ICON_MIN) / (DOCK_ICON_MAX - DOCK_ICON_MIN) * (track.right - track.left)
+fn slider_x(c: Control, track: &D2D_RECT_F, value: f32) -> f32 {
+    let (min, max, ..) = c.range();
+    track.left + (value - min) / (max - min) * (track.right - track.left)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -147,8 +169,8 @@ pub enum Target {
     Close,
     Minimize,
     Control(Control),
-    /// On the size slider: drag starts here.
-    Slider,
+    /// On a slider: drag starts here.
+    Slider(Control),
 }
 
 pub fn hit(l: &Layout, x: f32, y: f32) -> Option<Target> {
@@ -158,10 +180,10 @@ pub fn hit(l: &Layout, x: f32, y: f32) -> Option<Target> {
         }
     }
     let (c, row) = l.rows.iter().find(|(_, r)| inside(r, x, y))?;
-    if *c == Control::Size {
+    if c.is_slider() {
         let t = track_rect(row);
         let grab = KNOB / 2.0 + 2.0;
-        return (x >= t.left - grab && x <= t.right + grab).then_some(Target::Slider);
+        return (x >= t.left - grab && x <= t.right + grab).then_some(Target::Slider(*c));
     }
     Some(Target::Control(*c))
 }
@@ -283,13 +305,14 @@ pub fn draw(dc: &ID2D1DeviceContext, dwrite: &IDWriteFactory, fonts: &Fonts, l: 
             }
             let focused = v.focus == Some(*c);
             match c {
-                Control::Size => {
+                Control::Size | Control::Magnify => {
                     let t = track_rect(row);
-                    let small = Label::new(dwrite, "Küçük", &fonts.small)?;
+                    let (.., low, high) = c.range();
+                    let small = Label::new(dwrite, low, &fonts.small)?;
                     small.draw_text(dc, t.left - 8.0 - small.width, mid2, fonts.cap * 11.0 / 13.0, &secondary);
-                    let big = Label::new(dwrite, "Büyük", &fonts.small)?;
+                    let big = Label::new(dwrite, high, &fonts.small)?;
                     big.draw_text(dc, t.right + 8.0, mid2, fonts.cap * 11.0 / 13.0, &secondary);
-                    let kx = slider_x(&t, v.settings.dock_icon);
+                    let kx = slider_x(*c, &t, c.value(&v.settings));
                     dc.FillRoundedRectangle(&rounded(t, 2.0), &brush(p.track)?);
                     dc.FillRoundedRectangle(&rounded(rect(t.left, t.top, kx, t.bottom), 2.0), &accent);
                     let ky = (t.top + t.bottom) / 2.0;
@@ -335,7 +358,7 @@ pub struct Prefs {
     comp: RefCell<Option<Comp>>,
     focus: Cell<Option<Control>>,
     pressed: Cell<Option<Target>>,
-    dragging: Cell<bool>,
+    dragging: Cell<Option<Control>>,
     active: Cell<bool>,
 }
 
@@ -352,7 +375,7 @@ pub fn init(gfx: Rc<Gfx>) -> Result<()> {
         comp: RefCell::new(None),
         focus: Cell::new(None),
         pressed: Cell::new(None),
-        dragging: Cell::new(false),
+        dragging: Cell::new(None),
         active: Cell::new(true),
     }));
     PREFS.with(|p| _ = p.set(prefs));
@@ -452,15 +475,18 @@ impl Prefs {
         ((lp.0 & 0xFFFF) as i16 as f32 / s, ((lp.0 >> 16) & 0xFFFF) as i16 as f32 / s)
     }
 
-    fn drag_to(&self, x: f32) {
+    fn drag_to(&self, c: Control, x: f32) {
         let l = layout();
-        let Some((_, row)) = l.rows.iter().find(|(c, _)| *c == Control::Size) else { return };
-        let v = slider_value(&track_rect(row), x);
-        settings::update(|s| s.dock_icon = v);
+        let Some((_, row)) = l.rows.iter().find(|(r, _)| *r == c) else { return };
+        let v = slider_value(c, &track_rect(row), x);
+        settings::update(|s| c.set_value(s, v));
     }
 
-    fn step_slider(&self, delta: f32) {
-        settings::update(|s| s.dock_icon = (s.dock_icon + delta).clamp(DOCK_ICON_MIN, DOCK_ICON_MAX));
+    /// Arrow keys move a slider by a tenth of its range.
+    fn step_slider(&self, c: Control, up: bool) {
+        let (min, max, step, ..) = c.range();
+        let delta = (((max - min) / 8.0) / step).round().max(1.0) * step * if up { 1.0 } else { -1.0 };
+        settings::update(|s| c.set_value(s, c.value(s) + delta));
     }
 
     fn activate(&self, t: Target) {
@@ -468,7 +494,7 @@ impl Prefs {
             Target::Close => unsafe { _ = PostMessageW(Some(self.hwnd.get()), WM_CLOSE, WPARAM(0), LPARAM(0)) },
             Target::Minimize => unsafe { _ = ShowWindow(self.hwnd.get(), SW_MINIMIZE) },
             Target::Control(c) => settings::update(|s| c.toggle(s)),
-            Target::Slider => {}
+            Target::Slider(_) => {}
         }
     }
 
@@ -490,11 +516,13 @@ impl Prefs {
             k if k == VK_TAB.0 => self.move_focus(down(VK_SHIFT.0)),
             k if k == VK_ESCAPE.0 || (k == b'W' as u16 && down(VK_CONTROL.0)) => self.activate(Target::Close),
             k if k == VK_SPACE.0 || k == VK_RETURN.0 => match self.focus.get() {
-                Some(c) if c != Control::Size => self.activate(Target::Control(c)),
+                Some(c) if !c.is_slider() => self.activate(Target::Control(c)),
                 _ => return false,
             },
-            k if (k == VK_LEFT.0 || k == VK_DOWN.0) && self.focus.get() == Some(Control::Size) => self.step_slider(-4.0),
-            k if (k == VK_RIGHT.0 || k == VK_UP.0) && self.focus.get() == Some(Control::Size) => self.step_slider(4.0),
+            k if [VK_LEFT.0, VK_DOWN.0, VK_RIGHT.0, VK_UP.0].contains(&k) => match self.focus.get() {
+                Some(c) if c.is_slider() => self.step_slider(c, k == VK_RIGHT.0 || k == VK_UP.0),
+                _ => return false,
+            },
             _ => return false,
         }
         true
@@ -523,16 +551,16 @@ impl Handler for Prefs {
                 let t = hit(&layout(), x, y);
                 self.focus.set(None);
                 self.pressed.set(t);
-                if t == Some(Target::Slider) {
-                    self.dragging.set(true);
+                if let Some(Target::Slider(c)) = t {
+                    self.dragging.set(Some(c));
                     unsafe { SetCapture(hwnd) };
-                    self.drag_to(x);
+                    self.drag_to(c, x);
                 }
                 self.redraw();
             }
-            WM_MOUSEMOVE if self.dragging.get() => self.drag_to(self.point(lp).0),
+            WM_MOUSEMOVE if self.dragging.get().is_some() => self.drag_to(self.dragging.get().unwrap(), self.point(lp).0),
             WM_LBUTTONUP => {
-                if self.dragging.replace(false) {
+                if self.dragging.replace(None).is_some() {
                     unsafe { _ = ReleaseCapture() };
                 } else {
                     let (x, y) = self.point(lp);
@@ -593,16 +621,18 @@ mod tests {
         assert_eq!(hit(&l, auto.left + 30.0, auto.top + 10.0), Some(Target::Control(Control::AutoHide)));
         let (_, size) = l.rows.iter().find(|(c, _)| *c == Control::Size).unwrap();
         let t = track_rect(size);
-        assert_eq!(hit(&l, (t.left + t.right) / 2.0, (t.top + t.bottom) / 2.0), Some(Target::Slider));
+        assert_eq!(hit(&l, (t.left + t.right) / 2.0, (t.top + t.bottom) / 2.0), Some(Target::Slider(Control::Size)));
         assert_eq!(hit(&l, size.left + 10.0, size.top + 10.0), None, "the size label is not a control");
     }
 
     #[test]
     fn slider_maps_ends_and_middle() {
         let t = rect(100.0, 0.0, 200.0, 4.0);
-        assert_eq!(slider_value(&t, 50.0), DOCK_ICON_MIN);
-        assert_eq!(slider_value(&t, 250.0), DOCK_ICON_MAX);
-        assert_eq!(slider_value(&t, 150.0), 48.0);
-        assert_eq!(slider_x(&t, 48.0), 150.0);
+        assert_eq!(slider_value(Control::Size, &t, 50.0), DOCK_ICON_MIN);
+        assert_eq!(slider_value(Control::Size, &t, 250.0), DOCK_ICON_MAX);
+        assert_eq!(slider_value(Control::Size, &t, 150.0), 48.0);
+        assert_eq!(slider_x(Control::Size, &t, 48.0), 150.0);
+        assert_eq!(slider_value(Control::Magnify, &t, 100.0), 1.0, "left end is off");
+        assert!((slider_value(Control::Magnify, &t, 153.0) - 1.55).abs() < 1e-4, "0.05 steps");
     }
 }

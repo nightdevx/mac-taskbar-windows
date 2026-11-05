@@ -12,7 +12,7 @@ use windows_numerics::Matrix3x2;
 
 use crate::menubar::{self, Fonts, State};
 use crate::theme::{self, Rgba};
-use crate::{clock, dock, gfx, icons, prefs, status};
+use crate::{clock, dock, gfx, icons, magnify, prefs, status};
 
 const SCALE: f32 = 1.5;
 const WIDTH: f32 = 1280.0;
@@ -38,12 +38,21 @@ pub fn run(path: &str) -> Result<()> {
         net: status::Net::NoInternet { wifi: false },
     };
     let long = "Microsoft Visual Studio Code - Insiders Edition, a name long enough to be cut off before the icons. ".repeat(3);
-    // Live entries; drawn at the default size (dark) and the largest size (light).
-    let sizes = [crate::settings::Settings::default().dock_icon, crate::settings::DOCK_ICON_MAX];
+    // Live entries: default size at rest (dark), default size magnified with the
+    // pointer on the third icon (light), largest size at rest (dark).
+    let default = crate::settings::Settings::default();
     let dock_items: Vec<(icons::Icon, bool)> = dock::entries(&crate::settings::get())
         .iter()
-        .map(|e| (icons::load(&e.source, (sizes[1] * SCALE).round() as u32), !e.windows.is_empty()))
+        .map(|e| (icons::load(&e.source, (crate::settings::DOCK_ICON_MAX * 2.0 * SCALE).round() as u32), !e.windows.is_empty()))
         .collect();
+    let n = dock_items.len();
+    let base = dock::Geometry { icon: default.dock_icon };
+    let pointer = base.item_x(2.min(n.saturating_sub(1))) + base.icon * 0.6;
+    let docks = [
+        (base, None, theme::DARK),
+        (base, Some(pointer), theme::LIGHT),
+        (dock::Geometry { icon: crate::settings::DOCK_ICON_MAX }, None, theme::DARK),
+    ];
     let rows = [
         (theme::DARK, "Gezgin", normal),
         (theme::LIGHT, "Gezgin", normal),
@@ -52,8 +61,8 @@ pub fn run(path: &str) -> Result<()> {
         (theme::LIGHT, "Not Defteri", status::Status { battery: Some(status::Battery { percent: 9, plugged: false }), net: status::Net::NoInternet { wifi: true }, ..normal }),
     ];
     let dock_top = rows.len() as f32 * (bar_h + gap) + gap;
-    let geo = sizes.map(|icon| dock::Geometry { icon });
-    let height = dock_top + geo[0].height() + geo[1].height() + 4.0 * gap;
+    let grow = |g: dock::Geometry| g.icon * (default.dock_magnify - 1.0);
+    let height = dock_top + docks.iter().map(|(g, ..)| g.height() + grow(*g) + 2.0 * gap).sum::<f32>();
 
     render_png(path, WIDTH, height, |dc| unsafe {
         let wall = dc.CreateSolidColorBrush(&WALLPAPER.d2d(), None)?;
@@ -67,11 +76,12 @@ pub fn run(path: &str) -> Result<()> {
             menubar::draw(dc, &dwrite, &fonts, &st, WIDTH, bar_h)?;
         }
         let mut y = dock_top + gap;
-        for (g, palette) in geo.into_iter().zip([theme::DARK, theme::LIGHT]) {
-            let w = g.width(dock_items.len());
-            dc.SetTransform(&Matrix3x2::translation(((WIDTH - w) / 2.0).round(), y));
-            draw_dock(dc, g, &dock_items, palette)?;
-            y += g.height() + 2.0 * gap;
+        for (g, pointer, palette) in docks {
+            let l = magnify::layout(g, n, pointer, default.dock_magnify);
+            let w = g.width(n);
+            dc.SetTransform(&Matrix3x2::translation(((WIDTH - w) / 2.0).round(), y + grow(g)));
+            draw_dock(dc, g, &l, &dock_items, palette)?;
+            y += g.height() + grow(g) + 2.0 * gap;
         }
         Ok(())
     })
@@ -100,12 +110,12 @@ fn prefs_png(path: &str, dwrite: &windows::Win32::Graphics::DirectWrite::IDWrite
 }
 
 /// Same geometry as the live dock (dock::Geometry), drawn flat for review.
-fn draw_dock(dc: &ID2D1DeviceContext, g: dock::Geometry, items: &[(icons::Icon, bool)], palette: theme::Palette) -> Result<()> {
+fn draw_dock(dc: &ID2D1DeviceContext, g: dock::Geometry, l: &magnify::Layout, items: &[(icons::Icon, bool)], palette: theme::Palette) -> Result<()> {
     unsafe {
-        let (w, h) = (g.width(items.len()), g.height());
+        let h = g.height();
         let fill = dc.CreateSolidColorBrush(&palette.bar.d2d(), None)?;
         let r = g.radius();
-        dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: 0.0, top: 0.0, right: w, bottom: h }, radiusX: r, radiusY: r }, &fill);
+        dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: l.left, top: 0.0, right: l.right, bottom: h }, radiusX: r, radiusY: r }, &fill);
         let dot = dc.CreateSolidColorBrush(&palette.text.d2d(), None)?;
         let props = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
@@ -113,9 +123,9 @@ fn draw_dock(dc: &ID2D1DeviceContext, g: dock::Geometry, items: &[(icons::Icon, 
             dpiY: 96.0 * SCALE,
             ..Default::default()
         };
-        for (i, (icon, running)) in items.iter().enumerate() {
-            let x = g.item_x(i);
-            let (top, side) = (g.pad(), g.icon);
+        for ((icon, running), (x, k)) in items.iter().zip(&l.items) {
+            let (x, side) = (*x, g.icon * k);
+            let top = g.pad() + g.icon - side; // grows upward from the icon's bottom
             if !icon.pixels.is_empty() {
                 let bmp = dc.CreateBitmap(D2D_SIZE_U { width: icon.size, height: icon.size }, Some(icon.pixels.as_ptr() as *const _), icon.size * 4, &props)?;
                 dc.DrawBitmap(&bmp, Some(&D2D_RECT_F { left: x, top, right: x + side, bottom: top + side }), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
