@@ -40,6 +40,8 @@ const WM_RECHECK: u32 = WM_APP + 5;
 pub const WM_OPEN_SETTINGS: u32 = WM_APP + 6;
 /// Keep the dock out while settings change it: wparam 1 hold, 0 release, 2 peek.
 pub const WM_HOLD: u32 = WM_APP + 7;
+/// A full-screen app came (wparam 1) or left (0): the dock steps aside.
+pub const WM_FULLSCREEN: u32 = WM_APP + 8;
 /// Lives in UI::Controls in windows-rs; not worth the feature for one constant.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_HIDE: usize = 1;
@@ -1478,6 +1480,10 @@ impl Handler for Dock {
             }
             WM_TIMER if wp.0 == TIMER_PEEK => self.hold(0),
             WM_HOLD => self.hold(wp.0),
+            WM_FULLSCREEN if !self.hidden => unsafe {
+                preview::hide();
+                _ = ShowWindow(hwnd, if wp.0 != 0 { SW_HIDE } else { SW_SHOWNOACTIVATE });
+            },
             WM_TIMER if wp.0 == TIMER_REGION || wp.0 == TIMER_REST => {
                 unsafe { _ = KillTimer(Some(hwnd), wp.0) };
                 self.update_region();

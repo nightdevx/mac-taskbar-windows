@@ -9,7 +9,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook};
-use windows::Win32::UI::Shell::ABN_POSCHANGED;
+use windows::Win32::UI::Shell::{ABN_FULLSCREENAPP, ABN_POSCHANGED};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
@@ -318,6 +318,24 @@ impl MenuBar {
     }
 
     /// Sizes and positions the bar on the primary monitor; redraws if the size or DPI changed.
+    /// A full-screen app (game, video, slides) has the monitor: bar and dock
+    /// step aside until it leaves. Our own Launchpad and the desktop don't count.
+    fn fullscreen(&self, on: bool) {
+        if self.hidden {
+            return;
+        }
+        let fg = unsafe { GetForegroundWindow() };
+        if on && (crate::winlist::is_own(fg) || is_desktop(fg)) {
+            return;
+        }
+        unsafe {
+            _ = ShowWindow(self.hwnd.get(), if on { SW_HIDE } else { SW_SHOWNOACTIVATE });
+            if let Ok(dock) = FindWindowW(crate::dock::CLASS, None) {
+                _ = PostMessageW(Some(dock), crate::dock::WM_FULLSCREEN, WPARAM(on as usize), LPARAM(0));
+            }
+        }
+    }
+
     fn place(&self) {
         if self.placing.replace(true) {
             return;
@@ -515,6 +533,7 @@ impl Handler for MenuBar {
                 return Some(LRESULT(1));
             }
             WM_APPBAR if wp.0 as u32 == ABN_POSCHANGED => self.place(),
+            WM_APPBAR if wp.0 as u32 == ABN_FULLSCREENAPP => self.fullscreen(lp.0 != 0),
             WM_DPICHANGED | WM_DISPLAYCHANGE => self.place(),
             WM_SETTINGCHANGE => {
                 let what = if lp.0 == 0 {
@@ -625,4 +644,11 @@ fn confirm(action: &'static str, x: i32, y: i32, run: impl FnOnce() + 'static) {
             run();
         }
     });
+}
+
+/// Desktop windows (wallpaper host): clicking the desktop can look "full screen" to the shell.
+fn is_desktop(hwnd: HWND) -> bool {
+    let mut buf = [0u16; 16];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
+    matches!(String::from_utf16_lossy(&buf[..n]).as_str(), "Progman" | "WorkerW")
 }
