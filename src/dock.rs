@@ -10,7 +10,7 @@ use windows::Foundation::TimeSpan;
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
     CompositionDrawingSurface, CompositionRoundedRectangleGeometry, CompositionSurfaceBrush,
-    Compositor, ContainerVisual, ImplicitAnimationCollection, SpriteVisual,
+    AnimationIterationBehavior, Compositor, ContainerVisual, ImplicitAnimationCollection, SpriteVisual,
 };
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::*;
@@ -54,7 +54,13 @@ const TIMER_FOLLOW: usize = 4;
 const TIMER_PREVIEW: usize = 5;
 /// Release a short "peek" hold (settings changed from the keyboard).
 const TIMER_PEEK: usize = 6;
+/// Launch bounces are over: shrink the window region again.
+const TIMER_BOUNCE: usize = 7;
 const PREVIEW_DELAY_MS: u32 = 350;
+/// One bounce, up and down, and its height as a share of the icon (macOS).
+const BOUNCE_MS: u32 = 640;
+const BOUNCE_UP: f32 = 0.5;
+const LAUNCH_BOUNCES: u32 = 3;
 const PEEK_MS: u32 = 1200;
 /// Icons follow the pointer through a short animation, which also smooths the return.
 const FOLLOW_MS: u32 = 120;
@@ -268,6 +274,9 @@ pub struct Dock {
     requested: RefCell<HashSet<String>>,
     loader: RefCell<Option<Loader>>,
     placing: Cell<bool>,
+    /// Bouncing icons by source: true = asks for attention (until activated),
+    /// false = launching (until its first window or three bounces).
+    bouncing: RefCell<HashMap<String, bool>>,
     shellhook: u32,
     taskbar_created: u32,
 }
@@ -296,6 +305,7 @@ impl Dock {
             requested: RefCell::new(HashSet::new()),
             loader: RefCell::new(None),
             placing: Cell::new(false),
+            bouncing: RefCell::new(HashMap::new()),
             shellhook: unsafe { RegisterWindowMessageW(w!("SHELLHOOK")) },
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
         }));
@@ -450,7 +460,8 @@ impl Dock {
     fn headroom(&self) -> (f32, f32) {
         let g = self.geometry();
         let grow = g.icon * (settings::get().dock_magnify - 1.0);
-        (grow * (magnify::RADIUS + 0.5), grow)
+        // Above: room for magnified icons and for bouncing ones.
+        (grow * (magnify::RADIUS + 0.5), grow.max(g.icon * BOUNCE_UP))
     }
 
     /// Picks the bottom strip (on start, size, DPI or display change) and repositions.
@@ -611,7 +622,7 @@ impl Dock {
                     Some(CreateRectRgn(left, h - TRIGGER_PX, right, h)),
                     true,
                 );
-            } else if self.pointer.get().is_some() {
+            } else if self.pointer.get().is_some() || !self.bouncing.borrow().is_empty() {
                 SetWindowRgn(self.hwnd.get(), None, true);
             } else {
                 SetWindowRgn(
@@ -943,6 +954,7 @@ impl Dock {
 
     fn remove_item(&self, index: usize) {
         let item = self.items.borrow_mut().remove(index);
+        self.bouncing.borrow_mut().remove(&item.source);
         if let Some(c) = self.comp.borrow().as_ref() {
             _ = c.items.Children().and_then(|ch| ch.Remove(&item.icon));
             _ = c.items.Children().and_then(|ch| ch.Remove(&item.dot));
@@ -1025,7 +1037,75 @@ impl Dock {
             }
         };
         self.items.borrow_mut()[index].windows.push(hwnd);
+        let source = self.items.borrow()[index].source.clone();
+        if self.bouncing.borrow().get(&source) == Some(&false) {
+            self.stop_bounce(&source); // launched: its window is here
+        }
         self.relayout();
+    }
+
+    // ---- bouncing (launch and attention) ----
+
+    /// Bounces item `source` up and down: three times for a launch, until
+    /// stopped for attention. Runs on the compositor; the icon's Translation
+    /// moves, so magnification (Offset/Scale) keeps working meanwhile.
+    fn bounce(&self, source: &str, attention: bool) {
+        if self.hidden || self.bouncing.borrow().contains_key(source) {
+            return;
+        }
+        let items = self.items.borrow();
+        let Some(item) = items.iter().find(|i| i.source == source) else { return };
+        let c = &self.gfx.compositor;
+        let up = -(settings::get().dock_icon * BOUNCE_UP * self.scale()).round();
+        let run = || -> Result<()> {
+            item.icon.Properties()?.InsertVector3(&HSTRING::from("Translation"), Vector3::default())?;
+            let rise = c.CreateCubicBezierEasingFunction(Vector2 { X: 0.3, Y: 0.0 }, Vector2 { X: 0.4, Y: 1.0 })?;
+            let fall = c.CreateCubicBezierEasingFunction(Vector2 { X: 0.6, Y: 0.0 }, Vector2 { X: 0.8, Y: 0.6 })?;
+            let a = c.CreateVector3KeyFrameAnimation()?;
+            a.InsertKeyFrameWithEasingFunction(0.45, Vector3 { X: 0.0, Y: up, Z: 0.0 }, &rise)?;
+            a.InsertKeyFrameWithEasingFunction(1.0, Vector3::default(), &fall)?;
+            a.SetDuration(TimeSpan { Duration: BOUNCE_MS as i64 * 10_000 })?;
+            if attention {
+                a.SetIterationBehavior(AnimationIterationBehavior::Forever)?;
+            } else {
+                a.SetIterationBehavior(AnimationIterationBehavior::Count)?;
+                a.SetIterationCount(LAUNCH_BOUNCES as i32)?;
+            }
+            item.icon.StartAnimation(&HSTRING::from("Translation"), &a)
+        };
+        if let Err(e) = run() {
+            return log::error(&format!("bounce: {e}"));
+        }
+        drop(items);
+        self.bouncing.borrow_mut().insert(source.to_string(), attention);
+        self.update_region();
+        if !attention {
+            unsafe { SetTimer(Some(self.hwnd.get()), TIMER_BOUNCE, BOUNCE_MS * LAUNCH_BOUNCES + 50, None) };
+        }
+    }
+
+    fn stop_bounce(&self, source: &str) {
+        if self.bouncing.borrow_mut().remove(source).is_none() {
+            return;
+        }
+        if let Some(item) = self.items.borrow().iter().find(|i| i.source == source) {
+            _ = item.icon.StopAnimation(&HSTRING::from("Translation"));
+            _ = item.icon.Properties().and_then(|p| p.InsertVector3(&HSTRING::from("Translation"), Vector3::default()));
+        }
+        self.update_region();
+    }
+
+    /// Launch bounces ran out: forget them (attention bounces keep going).
+    fn end_launch_bounces(&self) {
+        unsafe { _ = KillTimer(Some(self.hwnd.get()), TIMER_BOUNCE) };
+        let done: Vec<String> = self.bouncing.borrow().iter().filter(|(_, a)| !**a).map(|(s, _)| s.clone()).collect();
+        for s in done {
+            self.stop_bounce(&s);
+        }
+    }
+
+    fn source_of_window(&self, hwnd: HWND) -> Option<String> {
+        self.items.borrow().iter().find(|i| i.windows.contains(&hwnd)).map(|i| i.source.clone())
     }
 
     fn remove_window(&self, hwnd: HWND) {
@@ -1045,14 +1125,26 @@ impl Dock {
 
     fn on_shell(&self, event: ShellEvent) {
         match event {
-            ShellEvent::Created(h) | ShellEvent::Activated(h) | ShellEvent::Redraw(h) => {
-                self.add_window(h)
+            ShellEvent::Activated(h) => {
+                self.add_window(h);
+                if let Some(s) = self.source_of_window(h) {
+                    self.stop_bounce(&s);
+                }
+            }
+            ShellEvent::Created(h) | ShellEvent::Redraw(h) => self.add_window(h),
+            ShellEvent::Flash(h) => {
+                self.add_window(h);
+                if unsafe { GetForegroundWindow() } != h
+                    && let Some(s) = self.source_of_window(h)
+                {
+                    self.bounce(&s, true);
+                }
             }
             ShellEvent::Destroyed(h) | ShellEvent::Replaced(h) => {
                 preview::forget(h);
                 self.remove_window(h);
             }
-            ShellEvent::Flash(_) | ShellEvent::Other => {}
+            ShellEvent::Other => {}
         }
     }
 
@@ -1103,7 +1195,11 @@ impl Dock {
                 item.pin.clone().unwrap_or_else(|| item.source.clone()),
             )
         };
+        self.stop_bounce(&source);
         if windows.is_empty() || new_instance {
+            if windows.is_empty() {
+                self.bounce(&source, false);
+            }
             unsafe {
                 ShellExecuteW(
                     None,
@@ -1480,6 +1576,7 @@ impl Handler for Dock {
             }
             WM_TIMER if wp.0 == TIMER_PEEK => self.hold(0),
             WM_HOLD => self.hold(wp.0),
+            WM_TIMER if wp.0 == TIMER_BOUNCE => self.end_launch_bounces(),
             WM_FULLSCREEN if !self.hidden => unsafe {
                 preview::hide();
                 _ = ShowWindow(hwnd, if wp.0 != 0 { SW_HIDE } else { SW_SHOWNOACTIVATE });
